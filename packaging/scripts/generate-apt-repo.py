@@ -98,6 +98,30 @@ def write_release(repo_root, packages_bytes):
     (repo_root / "Release").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_index(repo_root):
+    html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Showcase APT Repository</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 64px auto; padding: 0 20px; color: #171717; line-height: 1.5; }
+    code { background: #f1f1f1; padding: 2px 5px; border-radius: 4px; }
+    a { color: #0969da; }
+  </style>
+</head>
+<body>
+  <h1>Showcase APT Repository</h1>
+  <p>Add this source in Sileo, Cydia, or Zebra.</p>
+  <p><code>https://amineross.github.io/showcase/</code></p>
+  <p>Package index files are available as <a href="Packages">Packages</a>, <a href="Packages.gz">Packages.gz</a>, and <a href="Release">Release</a>.</p>
+</body>
+</html>
+"""
+    (repo_root / "index.html").write_text(html, encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate a small jailbreak APT repository index.")
     parser.add_argument("repo", nargs="?", default="repo", help="Repository root containing debs/")
@@ -125,6 +149,7 @@ def main():
         shutil.copytree(source_depictions, target_depictions)
 
     write_release(repo_root, packages)
+    write_index(repo_root)
     print(f"Wrote Packages, Packages.gz, Packages.bz2, and Release for {len(debs)} deb(s).")
 
 
