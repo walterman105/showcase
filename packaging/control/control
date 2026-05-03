@@ -9,6 +9,7 @@ Depends: firmware (>= 12.0), libssl3 (>= 3.2.1), uikittools
 Conflicts: ch.ringwald.btstack
 Replaces: ch.ringwald.btstack (<= 1.1-1)
 Homepage: https://github.com/amineross/showcase
+Icon: https://amineross.github.io/showcase/icons/showcase.png
 Depiction: https://amineross.github.io/showcase/depictions/cydia.html
 SileoDepiction: https://amineross.github.io/showcase/depictions/sileo.json
 Description: Software wireless CarPlay receiver for jailbroken iPads.

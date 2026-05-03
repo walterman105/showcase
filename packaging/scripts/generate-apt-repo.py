@@ -83,6 +83,7 @@ def write_release(repo_root, packages_bytes):
         "Version: 1.0",
         "Architectures: iphoneos-arm",
         "Components: main",
+        "Icon: https://amineross.github.io/showcase/CydiaIcon.png",
         f"Date: {now}",
         "Description: Showcase jailbreak package repository",
         "MD5Sum:",
@@ -147,6 +148,17 @@ def main():
         if target_depictions.exists():
             shutil.rmtree(target_depictions)
         shutil.copytree(source_depictions, target_depictions)
+
+    source_assets = Path(__file__).resolve().parents[1] / "assets"
+    if source_assets.is_dir():
+        target_icons = repo_root / "icons"
+        if target_icons.exists():
+            shutil.rmtree(target_icons)
+        target_icons.mkdir(parents=True)
+        shutil.copy2(source_assets / "showcase.png", target_icons / "showcase.png")
+        shutil.copy2(source_assets / "profile.png", target_icons / "profile.png")
+        shutil.copy2(source_assets / "profile.png", repo_root / "CydiaIcon.png")
+        shutil.copy2(source_assets / "profile.png", repo_root / "icon.png")
 
     write_release(repo_root, packages)
     write_index(repo_root)
