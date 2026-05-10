@@ -14,7 +14,7 @@ https://aminerostane.com/repo
 
 Then install `Showcase`.
 
-The install guide and protocol write-up live here.
+The install guide and protocol write-up :
 
 https://aminerostane.com/articles/showcase
 
