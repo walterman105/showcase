@@ -48,7 +48,6 @@ The package bundles `BTdaemon`, `libBTstack.dylib`, and the BTstack launch daemo
 ```text
 source/       app, Bluetooth helper, AirPlay helper, pairing code
 packaging/    Debian control files, depictions, package scripts
-report/       protocol research report
 icon/         app icons
 ```
 

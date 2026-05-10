@@ -9,13 +9,7 @@ packaging/payload/
 packaging/build/
 packaging/repo/
 
-report/*.aux
-report/*.fdb_latexmk
-report/*.fls
-report/*.log
-report/*.out
-report/*.toc
-report/*.synctex.gz
+report/
 
 source/*.o
 source/*.dSYM/
