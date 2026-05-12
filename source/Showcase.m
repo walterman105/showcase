@@ -78,7 +78,13 @@ static void ip_log_open(void) {
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
 #define BLUETOOTHD_PLIST  "/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
 #define LAUNCHCTL_PATH    "/bin/launchctl"
-#define BTDAEMON_PATH     "/usr/bin/BTdaemon"
+#ifdef SHOWCASE_ROOTLESS
+#define JB_PREFIX         "/var/jb"
+#else
+#define JB_PREFIX         ""
+#endif
+#define JB_PATH(path)     JB_PREFIX path
+#define BTDAEMON_PATH     JB_PATH("/usr/bin/BTdaemon")
 #define AP_INTERFACE      "bridge100"
 
 /* IPC message types */

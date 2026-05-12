@@ -2,7 +2,7 @@
 
 Showcase turns a jailbroken cellular iPad into a software wireless CarPlay receiver. The iPhone pairs through Settings, joins the iPad hotspot, sends the encrypted CarPlay video stream, and receives touch input from the iPad.
 
-The first public build targets rootful iOS 12. The tested receiver is an iPad Air 1 cellular on iOS 12.5.8.
+The first public beta ships in two package architectures. Rootful users get the iOS 12-14 build. Rootless users get the iOS 15-17 build for Dopamine and palera1n rootless.
 
 ## Install
 
@@ -23,10 +23,11 @@ https://aminerostane.com/articles/showcase
 | Item | Requirement |
 | --- | --- |
 | iPad | Cellular iPad with Personal Hotspot |
-| Tested receiver | iPad Air 1 cellular, A1475, iPad4,2 |
-| Tested firmware | iOS 12.5.8 |
-| Jailbreak | Rootful |
+| Tested rootful receiver | iPad Air 1 cellular, A1475, iPad4,2, iOS 12.5.8, checkra1n |
+| Community rootless target | Cellular iPads on iOS 15-17, Dopamine or palera1n rootless |
 | Runtime packages | `libssl3`, `uikittools` |
+
+Sileo, Cydia, and Zebra install runtime packages through normal APT dependency resolution. Manual dependency installation is only needed when sideloading a `.deb` with `dpkg -i`.
 
 The package bundles `BTdaemon`, `libBTstack.dylib`, and the BTstack launch daemon needed for `/tmp/BTstack`. It conflicts with the old `ch.ringwald.btstack` package to avoid file ownership collisions.
 
@@ -72,12 +73,13 @@ Build and test the app on the iPad first.
 cd packaging
 ./scripts/fetch-installed-app.sh
 ./scripts/build-rootful-deb.sh
+./scripts/build-rootless-deb.sh
 ./scripts/generate-apt-repo.py repo
 ```
 
-The `.deb` lands in `packaging/build/`. The APT repository lands in `packaging/repo/`.
+The `.deb` files land in `packaging/build/`. The APT repository lands in `packaging/repo/`.
 
-For GitHub Releases, upload the `.deb` from `packaging/build/` after you rebuild the package. The first public asset should be `com.rostane.showcase_1.0~beta1-1_iphoneos-arm.deb` under a `v1.0-beta1` release.
+For GitHub Releases, upload both `.deb` files from `packaging/build/` after you rebuild the packages. The rootful asset ends in `iphoneos-arm.deb`; the rootless asset ends in `iphoneos-arm64.deb`.
 
 For Sileo, Cydia, and Zebra, publish the generated `packaging/repo/` contents to the web path that serves `https://aminerostane.com/repo`.
 

@@ -1,20 +1,20 @@
 Package: com.rostane.showcase
-Name: Showcase (iOS 12-14)
+Name: Showcase (iOS 15-17)
 Version: 1.0~beta1-1
-Architecture: iphoneos-arm
+Architecture: iphoneos-arm64
 Section: Utilities
 Maintainer: Amine Rostane <amine.rostane@outlook.com>
 Author: Amine Rostane <amine.rostane@outlook.com>
-Depends: firmware (>= 12.0), libssl3 (>= 3.2.1), uikittools
+Depends: firmware (>= 15.0), libssl3 (>= 3.0.0), uikittools
 Conflicts: ch.ringwald.btstack
 Replaces: ch.ringwald.btstack (<= 1.1-1)
 Homepage: https://github.com/amineross/showcase
 Icon: https://aminerostane.com/repo/icons/showcase.png
 Depiction: https://aminerostane.com/repo/depictions/cydia.html
 SileoDepiction: https://aminerostane.com/repo/depictions/sileo.json
-Description: Software wireless CarPlay receiver for rootful jailbreaks.
- Showcase turns a jailbroken iPad into a pure-software wireless CarPlay
- receiver. This package targets rootful iOS 12-14 jailbreaks and installs
- under the classic root filesystem layout.
+Description: Software wireless CarPlay receiver for rootless jailbreaks.
+ Showcase turns a jailbroken cellular iPad into a pure-software wireless
+ CarPlay receiver. This package targets rootless iOS 15-17 jailbreaks and
+ installs under /var/jb with iphoneos-arm64 package metadata.
  .
- Tested on iPad Air 1 cellular, iOS 12.5.8, rootful jailbreak layout.
+ Tested by the community on iPadOS 17 rootless environments. Still beta.

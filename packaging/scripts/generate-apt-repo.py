@@ -79,9 +79,9 @@ def write_release(repo_root, packages_bytes):
         "Origin: Rostane",
         "Label: Rostane",
         "Suite: stable",
-        "Codename: ios12-rootful",
+        "Codename: ios",
         "Version: 1.0",
-        "Architectures: iphoneos-arm",
+        "Architectures: iphoneos-arm iphoneos-arm64",
         "Components: main",
         "Icon: https://aminerostane.com/repo/CydiaIcon.png",
         f"Date: {now}",
@@ -116,7 +116,7 @@ def write_index(repo_root):
   <h1>Rostane APT Repository</h1>
   <p>Add this source in Sileo, Cydia, or Zebra.</p>
   <p><code>https://aminerostane.com/repo</code></p>
-  <p>Available packages: Showcase.</p>
+  <p>Available packages: Showcase for rootful iOS 12-14 and rootless iOS 15-17.</p>
   <p>Package index files are available as <a href="Packages">Packages</a>, <a href="Packages.gz">Packages.gz</a>, and <a href="Release">Release</a>.</p>
 </body>
 </html>
