@@ -245,6 +245,17 @@ static pid_t spawn_daemon(const char *path, char *const argv[], const char *logf
 
 static BOOL pid_alive(pid_t pid) { return pid > 0 && kill(pid, 0) == 0; }
 
+static BOOL wait_for_pid_alive(pid_t pid, int seconds, const char *name) {
+    for (int i = 0; i < seconds; i++) {
+        if (!pid_alive(pid)) {
+            ip_log("%s exited during startup wait at %d/%d sec", name, i, seconds);
+            return NO;
+        }
+        sleep(1);
+    }
+    return YES;
+}
+
 static void kill_pid(pid_t pid) {
     if (!pid_alive(pid)) return;
     kill(pid, SIGTERM);
@@ -1011,8 +1022,10 @@ static NSString *validateSSID(NSString *ssid) {
     };
     self.carplayBtPid = spawn_daemon([btPath UTF8String], btArgv, LOG_DIR "/carplay_bt.log");
     if (self.carplayBtPid <= 0) { [self failWith:@"carplay_bt failed to start"]; return; }
-    sleep(2);
-    if (!pid_alive(self.carplayBtPid)) { [self failWith:@"carplay_bt exited early"]; return; }
+    if (!wait_for_pid_alive(self.carplayBtPid, 8, "carplay_bt")) {
+        [self failWith:@"carplay_bt exited during setup"];
+        return;
+    }
 
     [self transitionTo:StatePreparingNet];
     [self bgPrepareNet];
@@ -1035,8 +1048,10 @@ static NSString *validateSSID(NSString *ssid) {
     };
     self.carplayServicesPid = spawn_daemon([svcPath UTF8String], svcArgv, LOG_DIR "/carplay_services.log");
     if (self.carplayServicesPid <= 0) { [self failWith:@"carplay_services failed to start"]; return; }
-    sleep(2);
-    if (!pid_alive(self.carplayServicesPid)) { [self failWith:@"carplay_services exited early"]; return; }
+    if (!wait_for_pid_alive(self.carplayServicesPid, 4, "carplay_services")) {
+        [self failWith:@"carplay_services exited during setup"];
+        return;
+    }
 
     [self transitionTo:StateAwaitingPhone];
 }

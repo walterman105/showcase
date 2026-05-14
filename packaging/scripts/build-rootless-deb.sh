@@ -94,6 +94,7 @@ mkdir -p \
   "$WORK/rootfs/var/jb/Applications/Showcase.app" \
   "$WORK/rootfs/var/jb/usr/bin" \
   "$WORK/rootfs/var/jb/usr/lib" \
+  "$WORK/rootfs/var/jb/usr/share/showcase" \
   "$WORK/rootfs/var/jb/Library/LaunchDaemons" \
   "$WORK/rootfs/DEBIAN" \
   "$BUILD" \
@@ -153,6 +154,10 @@ for bin in Showcase carplay_bt carplay_services; do
 done
 
 cp "$REPO_ROOT/source/Info.plist" "$WORK/rootfs/var/jb/Applications/Showcase.app/Info.plist"
+cp "$REPO_ROOT/source/ent_app.xml" "$WORK/rootfs/var/jb/usr/share/showcase/ent_app.xml"
+cp "$REPO_ROOT/source/ent_bt.xml" "$WORK/rootfs/var/jb/usr/share/showcase/ent_bt.xml"
+cp "$REPO_ROOT/source/ent_svc.xml" "$WORK/rootfs/var/jb/usr/share/showcase/ent_svc.xml"
+cp "$REPO_ROOT/source/ent_btdaemon.xml" "$WORK/rootfs/var/jb/usr/share/showcase/ent_btdaemon.xml"
 cp "$REPO_ROOT/icon/generated/"*.png "$WORK/rootfs/var/jb/Applications/Showcase.app/"
 lipo -thin arm64 "$BTSTACK_DAEMON" -output "$WORK/rootfs/var/jb/usr/bin/BTdaemon"
 lipo -thin arm64 "$BTSTACK_DYLIB" -output "$WORK/rootfs/var/jb/usr/lib/libBTstack.dylib"
@@ -194,8 +199,9 @@ find . -name '.DS_Store' -delete
 
 chown root:wheel .
 chown -R root:wheel var DEBIAN
-chmod 0755 . var var/jb var/jb/Applications var/jb/Applications/Showcase.app var/jb/usr var/jb/usr/bin var/jb/usr/lib var/jb/Library var/jb/Library/LaunchDaemons
+chmod 0755 . var var/jb var/jb/Applications var/jb/Applications/Showcase.app var/jb/usr var/jb/usr/bin var/jb/usr/lib var/jb/usr/share var/jb/usr/share/showcase var/jb/Library var/jb/Library/LaunchDaemons
 chmod 0644 var/jb/Applications/Showcase.app/Info.plist var/jb/Applications/Showcase.app/Icon*.png
+chmod 0644 var/jb/usr/share/showcase/ent_app.xml var/jb/usr/share/showcase/ent_bt.xml var/jb/usr/share/showcase/ent_svc.xml var/jb/usr/share/showcase/ent_btdaemon.xml
 chmod 4755 var/jb/Applications/Showcase.app/Showcase var/jb/Applications/Showcase.app/carplay_bt var/jb/Applications/Showcase.app/carplay_services
 chmod 0755 var/jb/usr/bin/BTdaemon var/jb/usr/lib/libBTstack.dylib
 chmod 0644 var/jb/Library/LaunchDaemons/ch.ringwald.BTstack.plist
