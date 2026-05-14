@@ -80,9 +80,10 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
 
-    <!-- iPad-only, fullscreen, status bar hidden -->
+    <!-- Universal, fullscreen, status bar hidden -->
     <key>UIDeviceFamily</key>
     <array>
+        <integer>1</integer>
         <integer>2</integer>
     </array>
     <key>UIRequiresFullScreen</key>

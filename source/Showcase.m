@@ -73,11 +73,10 @@ static void ip_log_open(void) {
  * ═══════════════════════════════════════════════════════════════ */
 
 #define APP_NAME          "Showcase"
-#define APP_VERSION       "1.0 beta 1"
+#define APP_VERSION       "1.0 beta 2"
 #define APP_AUTHOR        "Amine Rostane"
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
 #define BLUETOOTHD_PLIST  "/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
-#define LAUNCHCTL_PATH    "/bin/launchctl"
 #ifdef SHOWCASE_ROOTLESS
 #define JB_PREFIX         "/var/jb"
 #else
@@ -86,6 +85,8 @@ static void ip_log_open(void) {
 #define JB_PATH(path)     JB_PREFIX path
 #define BTDAEMON_PATH     JB_PATH("/usr/bin/BTdaemon")
 #define AP_INTERFACE      "bridge100"
+#define PHONE_CANVAS_W    1024.0
+#define PHONE_CANVAS_H    768.0
 
 /* IPC message types */
 #define MSG_VIDEO_CONFIG  0x01
@@ -111,6 +112,30 @@ typedef NS_ENUM(NSInteger, ShowcaseState) {
     StateActive,
     StateStopping,
 };
+
+static const char *launchctl_path(void) {
+#ifdef SHOWCASE_ROOTLESS
+    static const char *paths[] = {
+        "/var/jb/usr/bin/launchctl",
+        "/var/jb/bin/launchctl",
+        "/bin/launchctl",
+        "/usr/bin/launchctl",
+        NULL
+    };
+#else
+    static const char *paths[] = {
+        "/bin/launchctl",
+        "/usr/bin/launchctl",
+        "/var/jb/usr/bin/launchctl",
+        "/var/jb/bin/launchctl",
+        NULL
+    };
+#endif
+    for (int i = 0; paths[i]; i++) {
+        if (access(paths[i], X_OK) == 0) return paths[i];
+    }
+    return NULL;
+}
 
 /* ═══════════════════════════════════════════════════════════════
  * Globals
@@ -433,11 +458,42 @@ static NSString *validateSSID(NSString *ssid) {
 @class AppDelegate;
 
 @interface RootViewController : UIViewController
+@property (nonatomic, strong) UIView *contentView;
 @property (nonatomic, weak) VideoView *videoView;
 @property (nonatomic, weak) AppDelegate *appDelegate;
 @end
 
 @implementation RootViewController
+- (void)loadView {
+    UIView *root = [[UIView alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
+    root.backgroundColor = [UIColor blackColor];
+    self.view = root;
+
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone) {
+        self.contentView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, PHONE_CANVAS_W, PHONE_CANVAS_H)];
+        self.contentView.backgroundColor = [UIColor blackColor];
+        self.contentView.layer.masksToBounds = YES;
+        [root addSubview:self.contentView];
+    } else {
+        self.contentView = root;
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (self.contentView == self.view) {
+        self.contentView.frame = self.view.bounds;
+        self.contentView.transform = CGAffineTransformIdentity;
+        return;
+    }
+
+    CGSize s = self.view.bounds.size;
+    CGFloat scale = MIN(s.width / PHONE_CANVAS_W, s.height / PHONE_CANVAS_H);
+    self.contentView.bounds = CGRectMake(0, 0, PHONE_CANVAS_W, PHONE_CANVAS_H);
+    self.contentView.center = CGPointMake(s.width / 2.0, s.height / 2.0);
+    self.contentView.transform = CGAffineTransformMakeScale(scale, scale);
+}
+
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return UIInterfaceOrientationMaskLandscape;  /* both Left and Right */
@@ -529,6 +585,10 @@ static NSString *validateSSID(NSString *ssid) {
 
 @implementation AppDelegate
 
+- (UIView *)rootContentView {
+    return self.vc.contentView ?: self.vc.view;
+}
+
 - (BOOL)application:(UIApplication *)app
     didFinishLaunchingWithOptions:(NSDictionary *)opts {
 
@@ -545,11 +605,13 @@ static NSString *validateSSID(NSString *ssid) {
     self.vc.view.backgroundColor = [UIColor blackColor];
     self.vc.appDelegate = self;
 
-    self.videoView = [[VideoView alloc] initWithFrame:self.vc.view.bounds];
+    UIView *content = [self rootContentView];
+
+    self.videoView = [[VideoView alloc] initWithFrame:content.bounds];
     self.videoView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.videoView.backgroundColor = [UIColor blackColor];
     ((AVSampleBufferDisplayLayer *)self.videoView.layer).videoGravity = AVLayerVideoGravityResizeAspect;
-    [self.vc.view addSubview:self.videoView];
+    [content addSubview:self.videoView];
     self.vc.videoView = self.videoView;
 
     [self buildSetupOverlay];
@@ -576,10 +638,11 @@ static NSString *validateSSID(NSString *ssid) {
 /* ─── UI construction ──────────────────────────────────────── */
 
 - (void)buildSetupOverlay {
-    self.setupOverlay = [[UIView alloc] initWithFrame:self.vc.view.bounds];
+    UIView *content = [self rootContentView];
+    self.setupOverlay = [[UIView alloc] initWithFrame:content.bounds];
     self.setupOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.setupOverlay.backgroundColor = [UIColor blackColor];
-    [self.vc.view addSubview:self.setupOverlay];
+    [content addSubview:self.setupOverlay];
 
     /* Wordmark */
     self.titleLabel = [[UILabel alloc] init];
@@ -647,7 +710,7 @@ static NSString *validateSSID(NSString *ssid) {
 }
 
 - (void)layoutSetupOverlay {
-    CGSize s = self.vc.view.bounds.size;
+    CGSize s = [self rootContentView].bounds.size;
     CGFloat W = s.width, H = s.height, cx = W / 2.0;
 
     self.titleLabel.frame    = CGRectMake(0,  H * 0.20, W, 80);
@@ -666,9 +729,10 @@ static NSString *validateSSID(NSString *ssid) {
 }
 
 - (void)buildChrome {
+    UIView *content = [self rootContentView];
     CGFloat sz = 44;
     CGFloat margin = 18;
-    CGSize bs = self.vc.view.bounds.size;
+    CGSize bs = content.bounds.size;
 
     /* Close button — top-right, hidden by default */
     self.closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -682,7 +746,7 @@ static NSString *validateSSID(NSString *ssid) {
     self.closeButton.titleEdgeInsets = UIEdgeInsetsMake(-3, 0, 0, 0);
     self.closeButton.hidden = YES;
     [self.closeButton addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.vc.view addSubview:self.closeButton];
+    [content addSubview:self.closeButton];
 
     /* Info button — top-left, always shown */
     self.infoButton = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -697,13 +761,13 @@ static NSString *validateSSID(NSString *ssid) {
         self.infoButton.titleLabel.font = [UIFont italicSystemFontOfSize:22];
     }
     [self.infoButton addTarget:self action:@selector(infoTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.vc.view addSubview:self.infoButton];
+    [content addSubview:self.infoButton];
 
     /* Tap recognizer — used during ACTIVE to wake chrome */
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
         initWithTarget:self action:@selector(revealChrome)];
     tap.cancelsTouchesInView = NO;
-    [self.vc.view addGestureRecognizer:tap];
+    [content addGestureRecognizer:tap];
 }
 
 /* ─── State machine ────────────────────────────────────────── */
@@ -914,9 +978,15 @@ static NSString *validateSSID(NSString *ssid) {
     reap_stale_helpers();
 
     /* 1. Unload bluetoothd */
+    const char *launchctl = launchctl_path();
+    if (!launchctl) {
+        [self failWith:@"launchctl not found"];
+        return;
+    }
+    ip_log("launchctl path: %s", launchctl);
     char *unloadArgv[] = { (char*)"launchctl", (char*)"unload",
                            (char*)BLUETOOTHD_PLIST, NULL };
-    int rc = run_blocking(LAUNCHCTL_PATH, unloadArgv);
+    int rc = run_blocking(launchctl, unloadArgv);
     if (rc != 0) ip_log("  WARNING: launchctl unload returned %d", rc);
     sleep(2);
 
@@ -985,9 +1055,14 @@ static NSString *validateSSID(NSString *ssid) {
         kill_pid(self.carplayBtPid);       self.carplayBtPid = 0;
         kill_pid(self.btdaemonPid);        self.btdaemonPid = 0;
 
-        char *loadArgv[] = { (char*)"launchctl", (char*)"load",
-                             (char*)BLUETOOTHD_PLIST, NULL };
-        run_blocking(LAUNCHCTL_PATH, loadArgv);
+        const char *launchctl = launchctl_path();
+        if (launchctl) {
+            char *loadArgv[] = { (char*)"launchctl", (char*)"load",
+                                 (char*)BLUETOOTHD_PLIST, NULL };
+            run_blocking(launchctl, loadArgv);
+        } else {
+            ip_log("WARNING: launchctl not found while restoring bluetoothd");
+        }
 
         dispatch_async(dispatch_get_main_queue(), ^{
             AVSampleBufferDisplayLayer *layer = (AVSampleBufferDisplayLayer *)self.videoView.layer;
@@ -1506,9 +1581,40 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
 @interface WifiSetupViewController ()
 @property (nonatomic, weak) UILabel *pillHintLabel;
 @property (nonatomic, weak) UIView  *pillView;
+@property (nonatomic, strong) UIView *contentView;
 @end
 
 @implementation WifiSetupViewController
+
+- (void)loadView {
+    UIView *root = [[UIView alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
+    root.backgroundColor = [UIColor blackColor];
+    self.view = root;
+
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone) {
+        self.contentView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, PHONE_CANVAS_W, PHONE_CANVAS_H)];
+        self.contentView.backgroundColor = [UIColor blackColor];
+        self.contentView.layer.masksToBounds = YES;
+        [root addSubview:self.contentView];
+    } else {
+        self.contentView = root;
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (self.contentView == self.view) {
+        self.contentView.frame = self.view.bounds;
+        self.contentView.transform = CGAffineTransformIdentity;
+        return;
+    }
+
+    CGSize s = self.view.bounds.size;
+    CGFloat scale = MIN(s.width / PHONE_CANVAS_W, s.height / PHONE_CANVAS_H);
+    self.contentView.bounds = CGRectMake(0, 0, PHONE_CANVAS_W, PHONE_CANVAS_H);
+    self.contentView.center = CGPointMake(s.width / 2.0, s.height / 2.0);
+    self.contentView.transform = CGAffineTransformMakeScale(scale, scale);
+}
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     return UIInterfaceOrientationMaskLandscape;
@@ -1522,8 +1628,9 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
 }
 
 - (void)buildUI {
-    CGFloat W = self.view.bounds.size.width;
-    CGFloat H = self.view.bounds.size.height;
+    UIView *root = self.contentView ?: self.view;
+    CGFloat W = root.bounds.size.width;
+    CGFloat H = root.bounds.size.height;
 
     /* ── Close button (top-right) ── */
     CGFloat closeSz = 40;
@@ -1537,7 +1644,7 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
     close.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightLight];
     close.titleEdgeInsets = UIEdgeInsetsMake(-2, 0, 0, 0);
     [close addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:close];
+    [root addSubview:close];
 
     /* ── Header ── */
     UILabel *eyebrow = [[UILabel alloc] init];
@@ -1553,7 +1660,7 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
             attributes:@{ NSKernAttributeName: @(3.0),
                           NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35],
                           NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold] }];
-    [self.view addSubview:eyebrow];
+    [root addSubview:eyebrow];
 
     UILabel *title = [[UILabel alloc] init];
     title.text = @"Wi-Fi Setup";
@@ -1562,7 +1669,7 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
     title.font = [UIFont systemFontOfSize:44 weight:UIFontWeightUltraLight];
     title.frame = CGRectMake(0, 80, W, 56);
     title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [self.view addSubview:title];
+    [root addSubview:title];
 
     /* ── Single centered column ── */
     CGFloat colW = MIN(620, W - 120);
@@ -1570,12 +1677,12 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
     CGFloat y = 168;
 
     /* ─────── STEP 1 ─────── */
-    [self.view addSubview:[self stepEyebrowAt:CGRectMake(colX, y, colW, 14) text:@"STEP 1"]];
+    [root addSubview:[self stepEyebrowAt:CGRectMake(colX, y, colW, 14) text:@"STEP 1"]];
     y += 22;
 
     UILabel *step1H = [self headlineLabel:@"Rename your iPad"
                                      rect:CGRectMake(colX, y, colW, 30)];
-    [self.view addSubview:step1H];
+    [root addSubview:step1H];
     y += 38;
 
     NSString *step1Body = @"iOS uses your iPad's name as the Personal Hotspot network. CarPlay needs this name to be at least 6 characters and to not contain words like iPad, iPhone, or iPod. You can change it in the iPad Settings app.";
@@ -1583,7 +1690,7 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
                                     font:[UIFont systemFontOfSize:15 weight:UIFontWeightRegular]];
     UILabel *body1 = [self bodyLabel:step1Body
                                 rect:CGRectMake(colX, y, colW, body1H)];
-    [self.view addSubview:body1];
+    [root addSubview:body1];
     y += body1H + 22;
 
     /* Tappable example name pill */
@@ -1594,35 +1701,35 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
                           NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.4],
                           NSFontAttributeName: [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold] }];
     exampleEyebrow.frame = CGRectMake(colX, y, colW, 14);
-    [self.view addSubview:exampleEyebrow];
+    [root addSubview:exampleEyebrow];
     y += 20;
 
     UIView *pill = [self buildCopyPillWithText:@"Carplay-Receiver"
                                           rect:CGRectMake(colX, y, colW, 56)];
-    [self.view addSubview:pill];
+    [root addSubview:pill];
     y += 72;
 
     /* Open Settings button */
     UIButton *openBtn = [self primaryButton:@"Open Settings"
                                         rect:CGRectMake(colX, y, colW, 50)
                                       action:@selector(openSettingsTapped)];
-    [self.view addSubview:openBtn];
+    [root addSubview:openBtn];
     y += 70;
 
     /* Divider */
     UIView *div = [[UIView alloc] init];
     div.frame = CGRectMake(colX, y, colW, 1);
     div.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
-    [self.view addSubview:div];
+    [root addSubview:div];
     y += 32;
 
     /* ─────── STEP 2 ─────── */
-    [self.view addSubview:[self stepEyebrowAt:CGRectMake(colX, y, colW, 14) text:@"STEP 2"]];
+    [root addSubview:[self stepEyebrowAt:CGRectMake(colX, y, colW, 14) text:@"STEP 2"]];
     y += 22;
 
     UILabel *step2H = [self headlineLabel:@"Set your credentials"
                                      rect:CGRectMake(colX, y, colW, 30)];
-    [self.view addSubview:step2H];
+    [root addSubview:step2H];
     y += 38;
 
     NSString *step2Body = @"After renaming your iPad and turning on Personal Hotspot, enter the hotspot name and password here. Showcase saves them and reuses them for every car.";
@@ -1630,13 +1737,13 @@ static bool read_exact(int fd, uint8_t *buf, size_t len) {
                                     font:[UIFont systemFontOfSize:15 weight:UIFontWeightRegular]];
     UILabel *body2 = [self bodyLabel:step2Body
                                 rect:CGRectMake(colX, y, colW, body2H)];
-    [self.view addSubview:body2];
+    [root addSubview:body2];
     y += body2H + 22;
 
     UIButton *credsBtn = [self primaryButton:@"Set Credentials"
                                         rect:CGRectMake(colX, y, colW, 50)
                                       action:@selector(credsTapped)];
-    [self.view addSubview:credsBtn];
+    [root addSubview:credsBtn];
 }
 
 /* ─── helpers ─── */

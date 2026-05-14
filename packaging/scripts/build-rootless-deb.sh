@@ -66,6 +66,7 @@ need_file "$REPO_ROOT/source/carplay_pair.h"
 need_file "$REPO_ROOT/source/Info.plist"
 need_file "$REPO_ROOT/source/ent_app.xml"
 need_file "$REPO_ROOT/source/ent_bt.xml"
+need_file "$REPO_ROOT/source/ent_btdaemon.xml"
 need_file "$REPO_ROOT/source/ent_svc.xml"
 
 command -v install_name_tool >/dev/null || {
@@ -106,6 +107,7 @@ cp "$REPO_ROOT/source/Showcase.m" \
    "$REPO_ROOT/source/Info.plist" \
    "$REPO_ROOT/source/ent_app.xml" \
    "$REPO_ROOT/source/ent_bt.xml" \
+   "$REPO_ROOT/source/ent_btdaemon.xml" \
    "$REPO_ROOT/source/ent_svc.xml" \
    "$WORK/send/"
 cp "$BTSTACK_DYLIB" "$WORK/send/libBTstack.dylib"
@@ -203,6 +205,7 @@ chmod 0644 DEBIAN/control
 ldid -S'$REMOTE_BASE/ent_app.xml' var/jb/Applications/Showcase.app/Showcase
 ldid -S'$REMOTE_BASE/ent_bt.xml'  var/jb/Applications/Showcase.app/carplay_bt
 ldid -S'$REMOTE_BASE/ent_svc.xml' var/jb/Applications/Showcase.app/carplay_services
+ldid -S'$REMOTE_BASE/ent_btdaemon.xml' var/jb/usr/bin/BTdaemon
 ldid -S var/jb/usr/lib/libBTstack.dylib
 
 find . -path ./DEBIAN -prune -o -type f -exec md5sum {} \\; > DEBIAN/md5sums
