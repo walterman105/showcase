@@ -138,6 +138,8 @@ static uint8_t iap2_detect[] = { 0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10 };
 static int wifi_config_sent = 0;
 static int start_session_sent = 0;
 static int transport_notification_seen = 0;
+static int wireless_carplay_connecting_seen = 0;
+static int wifi_config_request_count = 0;
 static char wifi_ipv6[INET6_ADDRSTRLEN] = "";
 static int packet_debug_count = 0;
 
@@ -459,6 +461,16 @@ static void send_auth_response(uint8_t *chal, int clen) {
  *    Param 0x0005 = AccessoryBSSID (6 bytes, AP MAC)
  * ═══════════════════════════════════════════════ */
 static void send_accessory_wifi_config(void) {
+    if (wifi_config_sent) {
+        printf("[WIFI] Duplicate 0x5703 suppressed: already sent for this iAP2 session "
+               "req_count=%d transport_seen=%d wcp_connecting_seen=%d start_session_sent=%d\n",
+               wifi_config_request_count,
+               transport_notification_seen,
+               wireless_carplay_connecting_seen,
+               start_session_sent);
+        return;
+    }
+
     PB pb; pb_init(&pb, 256);
 
     /* Param 1: SSID — NUL-terminated UTF-8 */
@@ -779,7 +791,20 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
 
     /* ── Wi-Fi provisioning ── */
     case 0x5702:
-        printf("[CP] *** RequestAccessoryWiFiConfigInfo ***\n");
+        wifi_config_request_count++;
+        printf("[CP] *** RequestAccessoryWiFiConfigInfo #%d ***\n", wifi_config_request_count);
+        printf("[CP]     state before 0x5703: wifi_config_sent=%d transport_seen=%d "
+               "wcp_connecting_seen=%d start_session_sent=%d\n",
+               wifi_config_sent,
+               transport_notification_seen,
+               wireless_carplay_connecting_seen,
+               start_session_sent);
+
+        if (wifi_config_sent) {
+            printf("[WIFI] Ignoring duplicate 0x5702 - 0x5703 already sent for this session\n");
+            break;
+        }
+
         send_accessory_wifi_config();
         break;
 
@@ -831,6 +856,9 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
                     };
                     const char *sn = (st < 6) ? status_names[st] : "Unknown";
                     printf(" → WirelessCarPlay status = %d (%s)", st, sn);
+                    if (st == 1) {
+                        wireless_carplay_connecting_seen = 1;
+                    }
                 } else if (pid4==0x0001 && pl4>=6) {
                     uint16_t tid = (params[off4e+4]<<8)|params[off4e+5];
                     printf(" → TransportComponentID = %d", tid);
@@ -844,6 +872,11 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
                 off4e += (pl4>0?pl4:4);
             }
         }
+        printf("[CP] 0x4E0D summary: wireless_carplay_connecting_seen=%d "
+               "wifi_config_sent=%d transport_seen=%d\n",
+               wireless_carplay_connecting_seen,
+               wifi_config_sent,
+               transport_notification_seen);
         printf("[CP] → NETWORK PHASE — iPhone should be switching to WiFi\n");
         printf("[CP] → Our AP BSSID: %02X:%02X:%02X:%02X:%02X:%02X\n",
                kApBSSID[0], kApBSSID[1], kApBSSID[2],
@@ -1090,7 +1123,7 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
     case 0x05:
         printf("[CP] Disconnected handle=0x%04X reason=0x%02X\n",
                sz > 4 ? R16(pkt,3) : 0, sz > 5 ? pkt[5] : 0xff);
-        active_cid=0;iap2_detected=0;link_established=0;wifi_config_sent=0;start_session_sent=0;transport_notification_seen=0;wifi_ipv6[0]='\0';
+        active_cid=0;iap2_detected=0;link_established=0;wifi_config_sent=0;start_session_sent=0;transport_notification_seen=0;wireless_carplay_connecting_seen=0;wifi_config_request_count=0;wifi_ipv6[0]='\0';
         break;
     case 0x06:
         printf("[CP] Auth complete status=0x%02X handle=0x%04X\n",
@@ -1153,7 +1186,7 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
     case 0x80:
         if(pkt[2]==0){
             active_cid=R16(pkt,12);rfcomm_mtu=R16(pkt,14);
-            iap2_detected=0;link_established=0;detect_count=0;wifi_config_sent=0;
+            iap2_detected=0;link_established=0;detect_count=0;wifi_config_sent=0;start_session_sent=0;transport_notification_seen=0;wireless_carplay_connecting_seen=0;wifi_config_request_count=0;wifi_ipv6[0]='\0';
             printf("[CP] RFCOMM OPEN cid=0x%04x mtu=%d\n",active_cid,rfcomm_mtu);
             usleep(100000);
             send_detect();
@@ -1163,7 +1196,7 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
         break;
     case 0x81:
         printf("[CP] RFCOMM CLOSED\n");
-        alarm(0);active_cid=0;iap2_detected=0;link_established=0;wifi_config_sent=0;start_session_sent=0;transport_notification_seen=0;wifi_ipv6[0]='\0';
+        alarm(0);active_cid=0;iap2_detected=0;link_established=0;wifi_config_sent=0;start_session_sent=0;transport_notification_seen=0;wireless_carplay_connecting_seen=0;wifi_config_request_count=0;wifi_ipv6[0]='\0';
         break;
     }
 }
