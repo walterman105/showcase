@@ -137,11 +137,26 @@ static uint8_t iap2_detect[] = { 0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10 };
 /* ── State tracking ── */
 static int wifi_config_sent = 0;
 static int start_session_sent = 0;
+static int wifi_config_requested = 0;
 static int transport_notification_seen = 0;
+static int wifi_config_sent_pre_transport = 0;
+static int wifi_config_sent_post_transport = 0;
 static int wireless_carplay_connecting_seen = 0;
 static int wifi_config_request_count = 0;
 static char wifi_ipv6[INET6_ADDRSTRLEN] = "";
 static int packet_debug_count = 0;
+
+static void reset_wireless_handoff_state(void) {
+    wifi_config_sent = 0;
+    start_session_sent = 0;
+    wifi_config_requested = 0;
+    transport_notification_seen = 0;
+    wifi_config_sent_pre_transport = 0;
+    wifi_config_sent_post_transport = 0;
+    wireless_carplay_connecting_seen = 0;
+    wifi_config_request_count = 0;
+    wifi_ipv6[0] = '\0';
+}
 
 /* ═══════════════════════════════════════════════
  *  Parameter builder
@@ -460,17 +475,7 @@ static void send_auth_response(uint8_t *chal, int clen) {
  *    Param 0x0004 = Channel (1 byte)
  *    Param 0x0005 = AccessoryBSSID (6 bytes, AP MAC)
  * ═══════════════════════════════════════════════ */
-static void send_accessory_wifi_config(void) {
-    if (wifi_config_sent) {
-        printf("[WIFI] Duplicate 0x5703 suppressed: already sent for this iAP2 session "
-               "req_count=%d transport_seen=%d wcp_connecting_seen=%d start_session_sent=%d\n",
-               wifi_config_request_count,
-               transport_notification_seen,
-               wireless_carplay_connecting_seen,
-               start_session_sent);
-        return;
-    }
-
+static void send_accessory_wifi_config(const char *phase) {
     PB pb; pb_init(&pb, 256);
 
     /* Param 1: SSID — NUL-terminated UTF-8 */
@@ -488,8 +493,14 @@ static void send_accessory_wifi_config(void) {
     /* v38: REMOVED BSSID param (0x0005) — not in wiomoc reference impl.
      * iPhone may reject messages with unexpected/unknown params. */
 
-    printf("[WIFI] Sending 0x5703: SSID=\"%s\" PASS=****** SEC=%d CH=%d\n",
-           kWifiSSID, kWifiSecurityType, kWifiChannel);
+    printf("[WIFI] Sending %s 0x5703: SSID=\"%s\" PASS=****** SEC=%d CH=%d\n",
+           phase ? phase : "UNKNOWN", kWifiSSID, kWifiSecurityType, kWifiChannel);
+    printf("[WIFI] state before 0x5703: requested=%d transport_seen=%d "
+           "pre_sent=%d post_sent=%d\n",
+           wifi_config_requested,
+           transport_notification_seen,
+           wifi_config_sent_pre_transport,
+           wifi_config_sent_post_transport);
     printf("[WIFI]   (no BSSID param — matching wiomoc reference)\n");
 
     printf("[WIFI] Payload redacted (%d bytes, contains hotspot credentials)\n", pb.off);
@@ -792,20 +803,36 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
     /* ── Wi-Fi provisioning ── */
     case 0x5702:
         wifi_config_request_count++;
+        wifi_config_requested = 1;
         printf("[CP] *** RequestAccessoryWiFiConfigInfo #%d ***\n", wifi_config_request_count);
-        printf("[CP]     state before 0x5703: wifi_config_sent=%d transport_seen=%d "
-               "wcp_connecting_seen=%d start_session_sent=%d\n",
-               wifi_config_sent,
+        printf("[CP]     state before 0x5702 handling: requested=%d transport_seen=%d "
+               "pre_sent=%d post_sent=%d wcp_connecting_seen=%d start_session_sent=%d\n",
+               wifi_config_requested,
                transport_notification_seen,
+               wifi_config_sent_pre_transport,
+               wifi_config_sent_post_transport,
                wireless_carplay_connecting_seen,
                start_session_sent);
 
-        if (wifi_config_sent) {
-            printf("[WIFI] Ignoring duplicate 0x5702 - 0x5703 already sent for this session\n");
-            break;
+        if (transport_notification_seen) {
+            if (!wifi_config_sent_post_transport) {
+                printf("[WIFI] 0x5702 after 0x4E0E: sending POST-TRANSPORT 0x5703\n");
+                send_accessory_wifi_config("POST-TRANSPORT from 0x5702");
+                wifi_config_sent_post_transport = 1;
+            } else {
+                printf("[WIFI] Duplicate 0x5702 after 0x4E0E ignored; "
+                       "post-transport 0x5703 already sent\n");
+            }
+        } else {
+            if (!wifi_config_sent_pre_transport) {
+                printf("[WIFI] 0x5702 before 0x4E0E: sending PRE-TRANSPORT compatibility 0x5703\n");
+                send_accessory_wifi_config("PRE-TRANSPORT");
+                wifi_config_sent_pre_transport = 1;
+            } else {
+                printf("[WIFI] Duplicate 0x5702 before 0x4E0E ignored; "
+                       "pre-transport 0x5703 already sent\n");
+            }
         }
-
-        send_accessory_wifi_config();
         break;
 
     /* 0x4300 — CarPlayAvailability: not declared in identification, but handle
@@ -873,10 +900,12 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
             }
         }
         printf("[CP] 0x4E0D summary: wireless_carplay_connecting_seen=%d "
-               "wifi_config_sent=%d transport_seen=%d\n",
+               "requested=%d transport_seen=%d pre_sent=%d post_sent=%d\n",
                wireless_carplay_connecting_seen,
-               wifi_config_sent,
-               transport_notification_seen);
+               wifi_config_requested,
+               transport_notification_seen,
+               wifi_config_sent_pre_transport,
+               wifi_config_sent_post_transport);
         printf("[CP] → NETWORK PHASE — iPhone should be switching to WiFi\n");
         printf("[CP] → Our AP BSSID: %02X:%02X:%02X:%02X:%02X:%02X\n",
                kApBSSID[0], kApBSSID[1], kApBSSID[2],
@@ -920,6 +949,20 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
         }
         printf("[CP] → iPhone told us its WiFi transport identifier\n");
         transport_notification_seen = 1;
+        printf("[CP] 0x4E0E summary: requested=%d transport_seen=%d "
+               "pre_sent=%d post_sent=%d\n",
+               wifi_config_requested,
+               transport_notification_seen,
+               wifi_config_sent_pre_transport,
+               wifi_config_sent_post_transport);
+
+        if (!wifi_config_sent_post_transport) {
+            printf("[WIFI] 0x4E0E received: sending POST-TRANSPORT 0x5703 now\n");
+            send_accessory_wifi_config("POST-TRANSPORT after 0x4E0E");
+            wifi_config_sent_post_transport = 1;
+        } else {
+            printf("[WIFI] 0x4E0E received: post-transport 0x5703 already sent\n");
+        }
 
         /* This is the key trigger point. After 0x4E0E, the iPhone is about to
          * join our WiFi. Send 0x4301 CarPlayStartSession with the receiver's
@@ -1123,7 +1166,7 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
     case 0x05:
         printf("[CP] Disconnected handle=0x%04X reason=0x%02X\n",
                sz > 4 ? R16(pkt,3) : 0, sz > 5 ? pkt[5] : 0xff);
-        active_cid=0;iap2_detected=0;link_established=0;wifi_config_sent=0;start_session_sent=0;transport_notification_seen=0;wireless_carplay_connecting_seen=0;wifi_config_request_count=0;wifi_ipv6[0]='\0';
+        active_cid=0;iap2_detected=0;link_established=0;reset_wireless_handoff_state();
         break;
     case 0x06:
         printf("[CP] Auth complete status=0x%02X handle=0x%04X\n",
@@ -1186,7 +1229,7 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
     case 0x80:
         if(pkt[2]==0){
             active_cid=R16(pkt,12);rfcomm_mtu=R16(pkt,14);
-            iap2_detected=0;link_established=0;detect_count=0;wifi_config_sent=0;start_session_sent=0;transport_notification_seen=0;wireless_carplay_connecting_seen=0;wifi_config_request_count=0;wifi_ipv6[0]='\0';
+            iap2_detected=0;link_established=0;detect_count=0;reset_wireless_handoff_state();
             printf("[CP] RFCOMM OPEN cid=0x%04x mtu=%d\n",active_cid,rfcomm_mtu);
             usleep(100000);
             send_detect();
@@ -1196,7 +1239,7 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
         break;
     case 0x81:
         printf("[CP] RFCOMM CLOSED\n");
-        alarm(0);active_cid=0;iap2_detected=0;link_established=0;wifi_config_sent=0;start_session_sent=0;transport_notification_seen=0;wireless_carplay_connecting_seen=0;wifi_config_request_count=0;wifi_ipv6[0]='\0';
+        alarm(0);active_cid=0;iap2_detected=0;link_established=0;reset_wireless_handoff_state();
         break;
     }
 }
