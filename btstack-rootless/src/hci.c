@@ -3062,10 +3062,14 @@ void hci_init(const hci_transport_t *transport, const void *config){
     hci_stack->gap_required_encyrption_key_size = 7;
 #endif
 
-    // Secure Simple Pairing default: enable, no I/O capabilities, general bonding, mitm not required, auto accept 
+    // Showcase receiver mode: CarPlay controllers expect a pairing peer that
+    // behaves like a display-capable accessory. NoInputNoOutput + general
+    // bonding causes some iPhones to abort SSP with authentication failure
+    // before RFCOMM opens. Keep auto-accept, but advertise a display/confirm
+    // role and dedicated bonding.
     hci_stack->ssp_enable = 1;
-    hci_stack->ssp_io_capability = SSP_IO_CAPABILITY_NO_INPUT_NO_OUTPUT;
-    hci_stack->ssp_authentication_requirement = SSP_IO_AUTHREQ_MITM_PROTECTION_NOT_REQUIRED_GENERAL_BONDING;
+    hci_stack->ssp_io_capability = SSP_IO_CAPABILITY_DISPLAY_YES_NO;
+    hci_stack->ssp_authentication_requirement = SSP_IO_AUTHREQ_MITM_PROTECTION_NOT_REQUIRED_DEDICATED_BONDING;
     hci_stack->ssp_auto_accept = 1;
 
     // Secure Connections: enable (requires support from Controller)

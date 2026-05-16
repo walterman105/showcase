@@ -73,7 +73,7 @@ static void ip_log_open(void) {
  * ═══════════════════════════════════════════════════════════════ */
 
 #define APP_NAME          "Showcase"
-#define APP_VERSION       "1.0 beta 2-7"
+#define APP_VERSION       "1.0 beta 2-8"
 #define APP_AUTHOR        "Amine Rostane"
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
 #define BLUETOOTHD_PLIST  "/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
@@ -1586,6 +1586,10 @@ static NSString *validateSSID(NSString *ssid) {
     const char *dpkgPaths[] = {
         "/var/jb/usr/bin/dpkg", "/var/jb/bin/dpkg", "/usr/bin/dpkg", "/bin/dpkg", NULL
     };
+    const char *dpkgQueryPaths[] = {
+        "/var/jb/usr/bin/dpkg-query", "/var/jb/bin/dpkg-query",
+        "/usr/bin/dpkg-query", "/bin/dpkg-query", NULL
+    };
     const char *unamePaths[] = {
         "/var/jb/usr/bin/uname", "/usr/bin/uname", "/bin/uname", NULL
     };
@@ -1602,6 +1606,7 @@ static NSString *validateSSID(NSString *ssid) {
     const char *tarPath = first_existing_tool(tarPaths);
     const char *launchctl = launchctl_path();
     const char *dpkgPath = first_existing_tool(dpkgPaths);
+    const char *dpkgQueryPath = first_existing_tool(dpkgQueryPaths);
     const char *unamePath = first_existing_tool(unamePaths);
     const char *ifconfigPath = first_existing_tool(ifconfigPaths);
     const char *psPath = first_existing_tool(psPaths);
@@ -1624,6 +1629,7 @@ static NSString *validateSSID(NSString *ssid) {
     [env appendFormat:@"launchctl=%s\n", launchctl ?: "(missing)"];
     [env appendFormat:@"tar=%s\n", tarPath ?: "(missing)"];
     [env appendFormat:@"dpkg=%s\n", dpkgPath ?: "(missing)"];
+    [env appendFormat:@"dpkg_query=%s\n", dpkgQueryPath ?: "(missing)"];
     [env appendFormat:@"btdaemon=%s\n", BTDAEMON_PATH];
     [env appendFormat:@"btstack_plist=%s\n", BTSTACK_PLIST];
     [env appendFormat:@"btstack_socket=%s exists=%s\n",
@@ -1655,10 +1661,14 @@ static NSString *validateSSID(NSString *ssid) {
         run_capture(psPath, argv, [[commandsDir stringByAppendingPathComponent:@"ps-aux.txt"] UTF8String]);
     }
     if (dpkgPath) {
-        char *argv1[] = { (char*)"dpkg", (char*)"-s", (char*)"com.rostane.showcase", NULL };
-        run_capture(dpkgPath, argv1, [[commandsDir stringByAppendingPathComponent:@"dpkg-showcase.txt"] UTF8String]);
         char *argv2[] = { (char*)"dpkg", (char*)"-l", NULL };
         run_capture(dpkgPath, argv2, [[commandsDir stringByAppendingPathComponent:@"dpkg-l.txt"] UTF8String]);
+    }
+    if (dpkgQueryPath) {
+        char *argv1[] = { (char*)"dpkg-query", (char*)"-s", (char*)"com.rostane.showcase", NULL };
+        run_capture(dpkgQueryPath, argv1, [[commandsDir stringByAppendingPathComponent:@"dpkg-showcase.txt"] UTF8String]);
+        char *argv2[] = { (char*)"dpkg-query", (char*)"-W", NULL };
+        run_capture(dpkgQueryPath, argv2, [[commandsDir stringByAppendingPathComponent:@"dpkg-query-W.txt"] UTF8String]);
     }
     if (launchctl) {
         char *argv[] = { (char*)"launchctl", (char*)"list", NULL };
