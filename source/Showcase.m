@@ -45,6 +45,7 @@ extern char **environ;
 #define TCPDUMP_DIR  "/var/mobile/Library/Showcase/dumps"
 #define TCPDUMP_LOG  TCPDUMP_DIR "/tcpdump.log"
 #define TCPDUMP_MAX_SECONDS 300
+#define DIAGNOSTICS_ENABLED_KEY @"diagnosticsEnabled"
 static FILE *g_logfile = NULL;
 
 static void ip_log(const char *fmt, ...) {
@@ -77,7 +78,7 @@ static void ip_log_open(void) {
  * ═══════════════════════════════════════════════════════════════ */
 
 #define APP_NAME          "Showcase"
-#define APP_VERSION       "1.0 beta 2-14"
+#define APP_VERSION       "1.0 beta 2-15"
 #define APP_AUTHOR        "Amine Rostane"
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
 #define BLUETOOTHD_PLIST  "/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
@@ -237,6 +238,11 @@ static void enable_btstack_hci_logging(void) {
     chmod(BTSTACK_PREFS, 0644);
     ip_log("BTstack HCI logging %s at %s",
            wrote == want ? "enabled" : "partially written", BTSTACK_PREFS);
+}
+
+static void disable_btstack_hci_logging(void) {
+    unlink(BTSTACK_PREFS);
+    ip_log("BTstack HCI logging disabled");
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -689,6 +695,7 @@ static NSString *validateSSID(NSString *ssid) {
 @property (nonatomic, copy)   NSString *currentTcpdumpPath;
 @property (nonatomic, strong) NSTimer *tcpdumpStopTimer;
 @property (nonatomic, assign) BOOL tcpdumpMissingPromptShown;
+@property (nonatomic, assign) BOOL diagnosticsEnabled;
 
 /* Networking */
 @property (nonatomic, assign) int listenFd;
@@ -727,6 +734,7 @@ static NSString *validateSSID(NSString *ssid) {
     self.bgTask = UIBackgroundTaskInvalid;
     self.tcpdumpPid = 0;
     self.tcpdumpMissingPromptShown = NO;
+    self.diagnosticsEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:DIAGNOSTICS_ENABLED_KEY];
     self.cars = [[CarStore alloc] init];
 
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
@@ -1056,7 +1064,7 @@ static NSString *validateSSID(NSString *ssid) {
     ShowcaseState old = self.state;
     self.state = s;
 
-    if (s == StateAwaitingPhone && old != StateAwaitingPhone) {
+    if (s == StateAwaitingPhone && old != StateAwaitingPhone && self.diagnosticsEnabled) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self startNetworkDumpCapture];
         });
@@ -1293,7 +1301,11 @@ static NSString *validateSSID(NSString *ssid) {
         return;
     }
 
-    enable_btstack_hci_logging();
+    if (self.diagnosticsEnabled) {
+        enable_btstack_hci_logging();
+    } else {
+        disable_btstack_hci_logging();
+    }
 
     reap_stale_helpers();
 
@@ -1338,7 +1350,8 @@ static NSString *validateSSID(NSString *ssid) {
 #else
     /* 2. Spawn BTdaemon */
     char *btdArgv[] = { (char*)"BTdaemon", NULL };
-    self.btdaemonPid = spawn_daemon(BTDAEMON_PATH, btdArgv, LOG_DIR "/btdaemon.log");
+    self.btdaemonPid = spawn_daemon(BTDAEMON_PATH, btdArgv,
+                                    self.diagnosticsEnabled ? LOG_DIR "/btdaemon.log" : "/dev/null");
     if (self.btdaemonPid <= 0) { [self failWith:@"BTdaemon failed to start"]; return; }
     sleep(3);
     if (!pid_alive(self.btdaemonPid)) { [self failWith:@"BTdaemon exited early"]; return; }
@@ -1356,7 +1369,8 @@ static NSString *validateSSID(NSString *ssid) {
         (char*)"--pass", passBuf,
         NULL
     };
-    self.carplayBtPid = spawn_daemon([btPath UTF8String], btArgv, LOG_DIR "/carplay_bt.log");
+    self.carplayBtPid = spawn_daemon([btPath UTF8String], btArgv,
+                                     self.diagnosticsEnabled ? LOG_DIR "/carplay_bt.log" : "/dev/null");
     if (self.carplayBtPid <= 0) { [self failWith:@"carplay_bt failed to start"]; return; }
     if (!wait_for_pid_alive(self.carplayBtPid, 8, "carplay_bt")) {
         [self failWith:@"carplay_bt exited during setup"];
@@ -1382,7 +1396,8 @@ static NSString *validateSSID(NSString *ssid) {
         (char*)"--name", nameBuf,
         NULL
     };
-    self.carplayServicesPid = spawn_daemon([svcPath UTF8String], svcArgv, LOG_DIR "/carplay_services.log");
+    self.carplayServicesPid = spawn_daemon([svcPath UTF8String], svcArgv,
+                                           self.diagnosticsEnabled ? LOG_DIR "/carplay_services.log" : "/dev/null");
     if (self.carplayServicesPid <= 0) { [self failWith:@"carplay_services failed to start"]; return; }
     if (!wait_for_pid_alive(self.carplayServicesPid, 4, "carplay_services")) {
         [self failWith:@"carplay_services exited during setup"];
@@ -1576,6 +1591,88 @@ static NSString *validateSSID(NSString *ssid) {
 
 /* ─── bridge100 tcpdump capture ────────────────────────────── */
 
+- (UIViewController *)topPresenter {
+    UIViewController *p = self.vc ?: self.window.rootViewController;
+    while (p.presentedViewController) p = p.presentedViewController;
+    return p ?: self.window.rootViewController;
+}
+
+- (void)presentAlertWithTitle:(NSString *)title message:(NSString *)message {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
+        message:message preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"OK"
+        style:UIAlertActionStyleDefault handler:nil]];
+    [[self topPresenter] presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)presentShareForURL:(NSURL *)url {
+    if (!url || ![[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+        [self presentAlertWithTitle:@"File Missing" message:@"The export file could not be found."];
+        return;
+    }
+
+    UIActivityViewController *avc =
+        [[UIActivityViewController alloc] initWithActivityItems:@[url]
+                                          applicationActivities:nil];
+    if (avc.popoverPresentationController) {
+        UIView *source = self.vc.contentView ?: self.vc.view;
+        avc.popoverPresentationController.sourceView = source;
+        avc.popoverPresentationController.sourceRect =
+            CGRectMake(CGRectGetMidX(source.bounds), CGRectGetMidY(source.bounds), 1, 1);
+        avc.popoverPresentationController.permittedArrowDirections = 0;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *presenter = [self topPresenter];
+        [presenter presentViewController:avc animated:YES completion:nil];
+    });
+}
+
+- (void)setDiagnosticsEnabled:(BOOL)enabled {
+    self.diagnosticsEnabled = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:DIAGNOSTICS_ENABLED_KEY];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    ip_log("diagnostics %s", enabled ? "enabled" : "disabled");
+
+    if (enabled) {
+        enable_btstack_hci_logging();
+        if (self.state == StateAwaitingPhone || self.state == StateActive) {
+            [self startNetworkDumpCapture];
+        }
+    } else {
+        [self stopNetworkDumpCaptureWithReason:@"diagnostics disabled"];
+        disable_btstack_hci_logging();
+    }
+}
+
+- (void)clearLogsAndDumps {
+    [self stopNetworkDumpCaptureWithReason:@"clearing logs and dumps"];
+
+    if (g_logfile) {
+        fclose(g_logfile);
+        g_logfile = NULL;
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *paths = @[
+        @LOG_DIR,
+        @TCPDUMP_DIR,
+        @"/var/mobile/Library/Showcase/diagnostics",
+        @"/tmp/hci_dump.pklg",
+        @"/var/log/BTstack.log"
+    ];
+    for (NSString *path in paths) {
+        [fm removeItemAtPath:path error:nil];
+    }
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"latestTcpdumpPath"];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"hasEverStartedTcpdump"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+
+    ip_log_open();
+    ip_log("logs and dumps cleared");
+    [self presentAlertWithTitle:@"Logs Cleared"
+                        message:@"Showcase logs, diagnostics archives, network dumps, and HCI dumps were removed."];
+}
+
 - (NSString *)timestampStringForFilename {
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
     fmt.dateFormat = @"yyyyMMdd-HHmmss";
@@ -1683,6 +1780,10 @@ static NSString *validateSSID(NSString *ssid) {
 }
 
 - (void)startNetworkDumpCapture {
+    if (!self.diagnosticsEnabled) {
+        ip_log("tcpdump not started; diagnostics disabled");
+        return;
+    }
     if (self.tcpdumpPid > 0 && pid_alive(self.tcpdumpPid)) return;
 
     const char *tcpdump = tcpdump_tool_path();
@@ -1754,26 +1855,13 @@ static NSString *validateSSID(NSString *ssid) {
             [self promptInstallTcpdumpIfNeeded];
             return;
         }
-        UIAlertController *err = [UIAlertController
-            alertControllerWithTitle:@"No Network Dump Yet"
-            message:@"Start CarPlay and wait until the screen says ‘Connect from your iPhone’. Showcase will capture bridge100 automatically for up to 5 minutes."
-            preferredStyle:UIAlertControllerStyleAlert];
-        [err addAction:[UIAlertAction actionWithTitle:@"OK"
-            style:UIAlertActionStyleDefault handler:nil]];
-        [self.vc presentViewController:err animated:YES completion:nil];
+        [self presentAlertWithTitle:@"No Network Dump Yet"
+                            message:@"Enable Diagnostics, start CarPlay, then wait until the screen says Connect from your iPhone. Showcase will capture bridge100 for up to 5 minutes."];
         return;
     }
 
     NSURL *url = [NSURL fileURLWithPath:dump];
-    UIActivityViewController *avc =
-        [[UIActivityViewController alloc] initWithActivityItems:@[url]
-                                          applicationActivities:nil];
-    if (avc.popoverPresentationController) {
-        avc.popoverPresentationController.sourceView = self.infoButton ?: self.vc.view;
-        avc.popoverPresentationController.sourceRect =
-            self.infoButton ? self.infoButton.bounds : self.vc.view.bounds;
-    }
-    [self.vc presentViewController:avc animated:YES completion:nil];
+    [self presentShareForURL:url];
 }
 
 - (void)copyPath:(NSString *)src toDiagnosticsDir:(NSString *)dir name:(NSString *)name {
@@ -1803,7 +1891,9 @@ static NSString *validateSSID(NSString *ssid) {
 }
 
 - (NSString *)createDiagnosticsArchive {
-    enable_btstack_hci_logging();
+    if (self.diagnosticsEnabled) {
+        enable_btstack_hci_logging();
+    }
 
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *base = @"/var/mobile/Library/Showcase/diagnostics";
@@ -1956,41 +2046,38 @@ static NSString *validateSSID(NSString *ssid) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [busy dismissViewControllerAnimated:YES completion:^{
                 if (!archive) {
-                    UIAlertController *err = [UIAlertController
-                        alertControllerWithTitle:@"Could Not Export Logs"
-                        message:@"tar was not available or the archive could not be created."
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    [err addAction:[UIAlertAction actionWithTitle:@"OK"
-                        style:UIAlertActionStyleDefault handler:nil]];
-                    [self.vc presentViewController:err animated:YES completion:nil];
+                    [self presentAlertWithTitle:@"Could Not Export Logs"
+                                        message:@"tar was not available or the archive could not be created."];
                     return;
                 }
                 NSURL *url = [NSURL fileURLWithPath:archive];
-                UIActivityViewController *avc =
-                    [[UIActivityViewController alloc] initWithActivityItems:@[url]
-                                                      applicationActivities:nil];
-                if (avc.popoverPresentationController) {
-                    avc.popoverPresentationController.sourceView = self.infoButton ?: self.vc.view;
-                    avc.popoverPresentationController.sourceRect =
-                        self.infoButton ? self.infoButton.bounds : self.vc.view.bounds;
-                }
-                [self.vc presentViewController:avc animated:YES completion:nil];
+                [self presentShareForURL:url];
             }];
         });
     });
 }
 
 - (void)showAbout {
-    NSString *msg = [NSString stringWithFormat:@"Version %s\nby %s",
-                     APP_VERSION, APP_AUTHOR];
+    NSString *msg = [NSString stringWithFormat:@"Version %s\nby %s\nDiagnostics: %@",
+                     APP_VERSION, APP_AUTHOR,
+                     self.diagnosticsEnabled ? @"On" : @"Off"];
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@APP_NAME
         message:msg preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:(self.diagnosticsEnabled ? @"Disable Diagnostics" : @"Enable Diagnostics")
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            [self setDiagnosticsEnabled:!self.diagnosticsEnabled];
+        }]];
     [ac addAction:[UIAlertAction actionWithTitle:@"Send Log"
         style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
             [self exportDiagnostics];
         }]];
 
-    if (!tcpdump_tool_path()) {
+    if (!self.diagnosticsEnabled) {
+        UIAlertAction *dump = [UIAlertAction actionWithTitle:@"Send Network Dump"
+            style:UIAlertActionStyleDefault handler:nil];
+        dump.enabled = NO;
+        [ac addAction:dump];
+    } else if (!tcpdump_tool_path()) {
         [ac addAction:[UIAlertAction actionWithTitle:@"Install tcpdump for Network Dump"
             style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
                 self.tcpdumpMissingPromptShown = NO;
@@ -2008,6 +2095,23 @@ static NSString *validateSSID(NSString *ssid) {
                        (self.tcpdumpPid > 0 && pid_alive(self.tcpdumpPid));
         [ac addAction:dump];
     }
+
+    [ac addAction:[UIAlertAction actionWithTitle:@"Clear Logs and Dumps"
+        style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) {
+            UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Clear Logs and Dumps?"
+                message:@"This removes saved logs, diagnostics archives, HCI dumps, and network pcaps from this device."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"Clear"
+                style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *b) {
+                    [self clearLogsAndDumps];
+                }]];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                style:UIAlertActionStyleCancel handler:nil]];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [[self topPresenter] presentViewController:confirm animated:YES completion:nil];
+            });
+        }]];
 
     [ac addAction:[UIAlertAction actionWithTitle:@"OK"
         style:UIAlertActionStyleDefault handler:nil]];
