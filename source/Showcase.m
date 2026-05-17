@@ -1628,7 +1628,7 @@ static NSString *validateSSID(NSString *ssid) {
 }
 
 - (void)setDiagnosticsEnabled:(BOOL)enabled {
-    self.diagnosticsEnabled = enabled;
+    _diagnosticsEnabled = enabled;
     [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:DIAGNOSTICS_ENABLED_KEY];
     [[NSUserDefaults standardUserDefaults] synchronize];
     ip_log("diagnostics %s", enabled ? "enabled" : "disabled");
