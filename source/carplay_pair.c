@@ -243,6 +243,26 @@ static int hash_session_key(const BIGNUM *S, unsigned char *dest) {
     return (int)len;  /* 64 */
 }
 
+static int hash_session_key_padded(const BIGNUM *S, int padded_len,
+                                   unsigned char *dest) {
+    int nbytes = BN_num_bytes(S);
+    if (nbytes < 0 || nbytes > padded_len) return -1;
+    unsigned char *bin = calloc(1, padded_len);
+    if (!bin) return -1;
+    BN_bn2bin(S, bin + (padded_len - nbytes));
+
+    unsigned int len;
+    hctx_t *h = hctx_new();
+    if (!h) { free(bin); return -1; }
+
+    hctx_init(h);
+    hctx_update(h, bin, padded_len);
+    hctx_final(h, dest, &len);
+    hctx_free(h);
+    free(bin);
+    return (int)len;
+}
+
 /* M = H(H(N) xor H(g) || H(I) || s || PAD(A) || PAD(B) || K)
  * A and B are LEFT-PADDED to N_length per SRP_FLAG_LEFT_PAD (Apple SDK).
  * Salt is raw bytes (not BIGNUM-converted). */
@@ -315,6 +335,12 @@ typedef struct {
     unsigned char M[SRP_HASH_LEN];
     unsigned char H_AMK[SRP_HASH_LEN];
     unsigned char session_key[SRP_SKEY_LEN];
+    unsigned char M_padded[SRP_HASH_LEN];
+    unsigned char H_AMK_padded[SRP_HASH_LEN];
+    unsigned char session_key_padded[SRP_SKEY_LEN];
+    int S_minimal_len;
+    int N_len;
+    int proof_mode;  /* 1=minimal-S KDF, 2=padded-S KDF */
 } srp_verifier_t;
 
 static void srp_init_random(void) {
@@ -468,14 +494,31 @@ static srp_verifier_t *srp_verifier_new(const char *username,
     memcpy(ver->username, username, ulen);
     ver->authenticated = 0;
 
-    /* Session key: K = SHA-512(S) */
-    hash_session_key(S, ver->session_key);
+    int len_N = BN_num_bytes(ver->ng->N);
+    ver->N_len = len_N;
+    ver->S_minimal_len = BN_num_bytes(S);
+
+    /* Session key compatibility:
+     * - minimal-S KDF is the behavior existing working devices used.
+     * - padded-S KDF covers clients that expect SHA512(PAD(S, len(N))).
+     * The verifier chooses the matching mode only after comparing M3. */
+    if (hash_session_key(S, ver->session_key) != SRP_SKEY_LEN ||
+        hash_session_key_padded(S, len_N, ver->session_key_padded) != SRP_SKEY_LEN) {
+        ng_free(ver->ng);
+        free(ver->username);
+        free(ver);
+        ver = NULL;
+        goto done;
+    }
 
     /* Compute expected client proof M and server proof H_AMK.
      * Pass raw salt bytes (not BIGNUM) to avoid leading-zero stripping. */
-    int len_N = BN_num_bytes(ver->ng->N);
     calculate_M(ver->ng, ver->M, username, salt, salt_len, A, B, ver->session_key);
     calculate_H_AMK(ver->H_AMK, A, ver->M, ver->session_key, len_N);
+    calculate_M(ver->ng, ver->M_padded, username, salt, salt_len, A, B,
+                ver->session_key_padded);
+    calculate_H_AMK(ver->H_AMK_padded, A, ver->M_padded,
+                    ver->session_key_padded, len_N);
 
     /* Store B for reference */
     ver->bytes_B = malloc(BN_num_bytes(B));
@@ -497,12 +540,27 @@ done:
 static int srp_verifier_verify(srp_verifier_t *ver,
                                 const unsigned char *client_M,
                                 const unsigned char **server_M2) {
+    printf("[PAIR] SRP S minimal len=%d, N len=%d\n",
+           ver->S_minimal_len, ver->N_len);
     if (memcmp(ver->M, client_M, SRP_HASH_LEN) == 0) {
         ver->authenticated = 1;
+        ver->proof_mode = 1;
         *server_M2 = ver->H_AMK;
+        printf("[PAIR] SRP proof matched using minimal-S KDF\n");
+        return 0;
+    }
+    if (memcmp(ver->M_padded, client_M, SRP_HASH_LEN) == 0) {
+        ver->authenticated = 1;
+        ver->proof_mode = 2;
+        memcpy(ver->session_key, ver->session_key_padded, SRP_SKEY_LEN);
+        memcpy(ver->M, ver->M_padded, SRP_HASH_LEN);
+        memcpy(ver->H_AMK, ver->H_AMK_padded, SRP_HASH_LEN);
+        *server_M2 = ver->H_AMK;
+        printf("[PAIR] SRP proof matched using padded-S KDF\n");
         return 0;
     }
     *server_M2 = NULL;
+    printf("[PAIR] SRP proof mismatch using both minimal and padded KDF\n");
     return -1;
 }
 
@@ -827,7 +885,7 @@ pair_ctx_t *pair_ctx_create(const uint8_t sk[32], const uint8_t pk[32], const ch
     memcpy(ctx->our_pk, pk, 32);
     strncpy(ctx->pin, pin ? pin : SRP_DEFAULT_PIN, sizeof(ctx->pin) - 1);
 
-    printf("[PAIR] Context created, PIN=%s\n", ctx->pin);
+    printf("[PAIR] Context created (SRP PIN configured)\n");
     return ctx;
 }
 
@@ -1000,7 +1058,7 @@ static uint8_t *handle_setup_m3(pair_ctx_t *ctx, const tlv_t *in, size_t *out_le
         return make_error_response(4, 2, out_len);  /* Auth error */
     }
 
-    printf("[PAIR] Client A: %zu bytes, Client proof: %zu bytes\n",
+    printf("[PAIR] SRP A len=%zu, client proof len=%zu\n",
            pk_item->len, proof_item->len);
 
     if (proof_item->len != SRP_HASH_LEN) {
@@ -1019,90 +1077,22 @@ static uint8_t *handle_setup_m3(pair_ctx_t *ctx, const tlv_t *in, size_t *out_le
         printf("[PAIR] ERROR: srp_verifier_new failed (SRP-6a safety check?)\n");
         return make_error_response(4, 2, out_len);
     }
+    if ((int)pk_item->len < ver->N_len) {
+        printf("[PAIR] client public key A shorter than N (%zu < %d); padded compatibility path available\n",
+               pk_item->len, ver->N_len);
+    }
 
     /* Verify client's proof */
     const unsigned char *server_M2 = NULL;
     int vret = srp_verifier_verify(ver, proof_item->data, &server_M2);
     if (vret != 0 || !server_M2) {
-        printf("[PAIR] ERROR: SRP proof verification FAILED with PIN='%s'\n", ctx->pin);
-        printf("[PAIR]   Expected M: ");
-        for (int i = 0; i < SRP_HASH_LEN; i++) printf("%02x", ver->M[i]);
-        printf("\n");
-        printf("[PAIR]   Got      M: ");
-        for (int i = 0; i < SRP_HASH_LEN; i++) printf("%02x", proof_item->data[i]);
-        printf("\n");
+        printf("[PAIR] ERROR: SRP proof verification failed after minimal and padded KDF checks\n");
         srp_verifier_delete(ver);
-
-        /* === PIN BRUTEFORCE DIAGNOSTIC ===
-         * Try a list of common PINs using the same salt + b to find the right one */
-        printf("[PAIR] --- PIN bruteforce diagnostic ---\n");
-        static const char *pin_candidates[] = {
-            "", "0000", "1234", "1111", "0001",
-            "Pair-Setup", "pair-setup",
-            "3939",  /* re-check with full diagnostic */
-            NULL
-        };
-
-        ng_t *diag_ng = ng_new();
-        BN_CTX *diag_ctx = BN_CTX_new();
-        BIGNUM *diag_salt = BN_bin2bn(ctx->srp_salt, SRP_SALT_BYTES, NULL);
-
-        for (int pi = 0; pin_candidates[pi]; pi++) {
-            const char *try_pin = pin_candidates[pi];
-            /* Compute verifier for this PIN */
-            BIGNUM *try_x = calculate_x(diag_salt, SRP_USERNAME,
-                                          (const unsigned char *)try_pin, strlen(try_pin));
-            if (!try_x) continue;
-            BIGNUM *try_v = BN_new();
-            BN_mod_exp(try_v, diag_ng->g, try_x, diag_ng->N, diag_ctx);
-            int try_vlen = BN_num_bytes(try_v);
-            unsigned char *try_vbytes = malloc(try_vlen);
-            BN_bn2bin(try_v, try_vbytes);
-
-            srp_verifier_t *try_ver = srp_verifier_new(SRP_USERNAME,
-                ctx->srp_salt, SRP_SALT_BYTES,
-                try_vbytes, try_vlen,
-                pk_item->data, (int)pk_item->len,
-                ctx->srp_b, 32);
-
-            if (try_ver) {
-                int match = (memcmp(try_ver->M, proof_item->data, SRP_HASH_LEN) == 0);
-                printf("[PAIR]   PIN='%s' → %s\n", try_pin, match ? "*** MATCH! ***" : "no match");
-                if (match) {
-                    printf("[PAIR] *** CORRECT PIN FOUND: '%s' ***\n", try_pin);
-                    /* Use this verifier's session key */
-                    memcpy(ctx->srp_session_key, try_ver->session_key, SRP_SKEY_LEN);
-                    ctx->srp_has_session_key = 1;
-                    /* Update PIN for future use */
-                    strncpy(ctx->pin, try_pin, sizeof(ctx->pin) - 1);
-                    ctx->pin[sizeof(ctx->pin) - 1] = '\0';
-                    /* Build M4 with the correct proof */
-                    uint8_t state4 = 4;
-                    tlv_item_t m4_items[2] = {
-                        { TLV_STATE, &state4, 1 },
-                        { TLV_PROOF, (uint8_t *)try_ver->H_AMK, SRP_HASH_LEN }
-                    };
-                    uint8_t *resp = tlv_build(m4_items, 2, out_len);
-                    srp_verifier_delete(try_ver);
-                    free(try_vbytes); BN_free(try_v); BN_free(try_x);
-                    BN_free(diag_salt); BN_CTX_free(diag_ctx); ng_free(diag_ng);
-                    ctx->setup_state = 4;
-                    printf("[PAIR] pair-setup M4 sent (State=4, Proof=%d)\n", SRP_HASH_LEN);
-                    return resp;
-                }
-                srp_verifier_delete(try_ver);
-            } else {
-                printf("[PAIR]   PIN='%s' → verifier creation failed\n", try_pin);
-            }
-            free(try_vbytes); BN_free(try_v); BN_free(try_x);
-        }
-        BN_free(diag_salt); BN_CTX_free(diag_ctx); ng_free(diag_ng);
-
-        printf("[PAIR] --- No PIN matched. SRP group or hash may be wrong. ---\n");
         return make_error_response(4, 2, out_len);
     }
 
-    printf("[PAIR] *** SRP proof verification SUCCEEDED ***\n");
+    printf("[PAIR] *** SRP proof verification SUCCEEDED mode=%s ***\n",
+           ver->proof_mode == 2 ? "padded-S" : "minimal-S");
 
     /* Save session key */
     memcpy(ctx->srp_session_key, ver->session_key, SRP_SKEY_LEN);

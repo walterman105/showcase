@@ -78,10 +78,11 @@ static void ip_log_open(void) {
  * ═══════════════════════════════════════════════════════════════ */
 
 #define APP_NAME          "Showcase"
-#define APP_VERSION       "1.0 beta 2-16"
+#define APP_VERSION       "1.0 beta 2-17"
 #define APP_AUTHOR        "Amine Rostane"
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
 #define BLUETOOTHD_PLIST  "/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
+#define BT_READY_PATH     "/tmp/showcase_bt_ready"
 #ifdef SHOWCASE_ROOTLESS
 #define JB_PREFIX         "/var/jb"
 #define BLUETOOL_PLIST    "/System/Library/LaunchDaemons/com.apple.BlueTool.plist"
@@ -328,6 +329,42 @@ static pid_t spawn_daemon(const char *path, char *const argv[], const char *logf
 }
 
 static BOOL pid_alive(pid_t pid) { return pid > 0 && kill(pid, 0) == 0; }
+
+static BOOL wait_for_bt_ready_or_exit(pid_t pid, int seconds) {
+    int loops = seconds * 10;
+    for (int i = 0; i < loops; i++) {
+        if (access(BT_READY_PATH, F_OK) == 0) {
+            ip_log("[BT] ready sentinel observed at %s", BT_READY_PATH);
+            return YES;
+        }
+
+        int status = 0;
+        pid_t done = waitpid(pid, &status, WNOHANG);
+        if (done == pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 62) {
+                ip_log("[BT] helper exited with BTSTACK_EVENT_POWERON_FAILED (62)");
+            } else if (WIFEXITED(status)) {
+                ip_log("[BT] helper exited before ready sentinel exit=%d", WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                ip_log("[BT] helper exited before ready sentinel signal=%d", WTERMSIG(status));
+            } else {
+                ip_log("[BT] helper exited before ready sentinel status=0x%x", status);
+            }
+            return NO;
+        }
+        if (done < 0 && errno != EINTR) {
+            if (errno == ECHILD && !pid_alive(pid)) {
+                ip_log("[BT] helper vanished before ready sentinel");
+                return NO;
+            }
+            ip_log("[BT] waitpid while waiting for ready sentinel failed: %s", strerror(errno));
+        }
+        usleep(100000);
+    }
+
+    ip_log("[BT] ready sentinel timeout after %d seconds path=%s", seconds, BT_READY_PATH);
+    return NO;
+}
 
 static BOOL wait_for_pid_alive(pid_t pid, int seconds, const char *name) {
     for (int i = 0; i < seconds; i++) {
@@ -696,6 +733,7 @@ static NSString *validateSSID(NSString *ssid) {
 @property (nonatomic, strong) NSTimer *tcpdumpStopTimer;
 @property (nonatomic, assign) BOOL tcpdumpMissingPromptShown;
 @property (nonatomic, assign) BOOL diagnosticsEnabled;
+@property (nonatomic, assign) BOOL helpersLoggedThisRun;
 
 /* Networking */
 @property (nonatomic, assign) int listenFd;
@@ -1306,6 +1344,8 @@ static NSString *validateSSID(NSString *ssid) {
     } else {
         disable_btstack_hci_logging();
     }
+    self.helpersLoggedThisRun = self.diagnosticsEnabled;
+    unlink(BT_READY_PATH);
 
     reap_stale_helpers();
 
@@ -1351,7 +1391,7 @@ static NSString *validateSSID(NSString *ssid) {
     /* 2. Spawn BTdaemon */
     char *btdArgv[] = { (char*)"BTdaemon", NULL };
     self.btdaemonPid = spawn_daemon(BTDAEMON_PATH, btdArgv,
-                                    self.diagnosticsEnabled ? LOG_DIR "/btdaemon.log" : "/dev/null");
+                                    LOG_DIR "/btdaemon.log");
     if (self.btdaemonPid <= 0) { [self failWith:@"BTdaemon failed to start"]; return; }
     sleep(3);
     if (!pid_alive(self.btdaemonPid)) { [self failWith:@"BTdaemon exited early"]; return; }
@@ -1370,10 +1410,14 @@ static NSString *validateSSID(NSString *ssid) {
         NULL
     };
     self.carplayBtPid = spawn_daemon([btPath UTF8String], btArgv,
-                                     self.diagnosticsEnabled ? LOG_DIR "/carplay_bt.log" : "/dev/null");
+                                     LOG_DIR "/carplay_bt.log");
     if (self.carplayBtPid <= 0) { [self failWith:@"carplay_bt failed to start"]; return; }
     if (!wait_for_pid_alive(self.carplayBtPid, 8, "carplay_bt")) {
         [self failWith:@"carplay_bt exited during setup"];
+        return;
+    }
+    if (!wait_for_bt_ready_or_exit(self.carplayBtPid, 12)) {
+        [self failWith:@"Bluetooth takeover failed. BTStack could not power on the controller."];
         return;
     }
 
@@ -1605,24 +1649,70 @@ static NSString *validateSSID(NSString *ssid) {
     [[self topPresenter] presentViewController:ac animated:YES completion:nil];
 }
 
-- (void)presentShareForURL:(NSURL *)url {
-    if (!url || ![[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
-        [self presentAlertWithTitle:@"File Missing" message:@"The export file could not be found."];
-        return;
-    }
-
-    UIActivityViewController *avc =
-        [[UIActivityViewController alloc] initWithActivityItems:@[url]
-                                          applicationActivities:nil];
-    if (avc.popoverPresentationController) {
-        UIView *source = self.vc.contentView ?: self.vc.view;
-        avc.popoverPresentationController.sourceView = source;
-        avc.popoverPresentationController.sourceRect =
-            CGRectMake(CGRectGetMidX(source.bounds), CGRectGetMidY(source.bounds), 1, 1);
-        avc.popoverPresentationController.permittedArrowDirections = 0;
-    }
+- (void)presentExportSavedAlertForPath:(NSString *)path reason:(NSString *)reason {
     dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *msg = [NSString stringWithFormat:@"%@\n\nSaved to:\n%@",
+                         reason ?: @"The share sheet could not be shown.", path ?: @"(unknown)"];
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"Export Saved"
+            message:msg preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"Copy Path"
+            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+                if (path.length) [UIPasteboard generalPasteboard].string = path;
+            }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"OK"
+            style:UIAlertActionStyleCancel handler:nil]];
         UIViewController *presenter = [self topPresenter];
+        if ([presenter isKindOfClass:[UIAlertController class]] && presenter.presentingViewController) {
+            presenter = presenter.presentingViewController;
+        }
+        [presenter presentViewController:ac animated:YES completion:nil];
+    });
+}
+
+- (void)presentShareForURL:(NSURL *)url {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *path = url.path;
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (!url || ![fm fileExistsAtPath:path] || ![fm isReadableFileAtPath:path]) {
+            ip_log("[SHARE] file missing/unreadable path=%s", path ? [path UTF8String] : "(nil)");
+            [self presentAlertWithTitle:@"File Missing" message:@"The export file could not be found or read."];
+            return;
+        }
+
+        UIActivityViewController *avc =
+            [[UIActivityViewController alloc] initWithActivityItems:@[url]
+                                              applicationActivities:nil];
+        avc.excludedActivityTypes = @[ UIActivityTypeAirDrop ];
+
+        UIViewController *presenter = [self topPresenter];
+        if (!presenter) {
+            ip_log("[SHARE] share failed: no presenter path=%s", [path UTF8String]);
+            [self presentExportSavedAlertForPath:path reason:@"The share sheet could not be shown."];
+            return;
+        }
+        if ([presenter isKindOfClass:[UIAlertController class]]) {
+            ip_log("[SHARE] share delayed: top presenter is alert");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [self presentShareForURL:url];
+            });
+            return;
+        }
+
+        if (avc.popoverPresentationController) {
+            UIView *source = presenter.view ?: self.vc.contentView ?: self.vc.view;
+            if (!source || CGRectIsEmpty(source.bounds)) {
+                ip_log("[SHARE] share failed: no stable source view path=%s", [path UTF8String]);
+                [self presentExportSavedAlertForPath:path reason:@"The export was created, but the share sheet had no valid presentation view."];
+                return;
+            }
+            avc.popoverPresentationController.sourceView = source;
+            avc.popoverPresentationController.sourceRect =
+                CGRectMake(CGRectGetMidX(source.bounds), CGRectGetMidY(source.bounds), 1, 1);
+            avc.popoverPresentationController.permittedArrowDirections = 0;
+        }
+
+        ip_log("[SHARE] presenting share sheet path=%s airdrop=excluded", [path UTF8String]);
         [presenter presentViewController:avc animated:YES completion:nil];
     });
 }
@@ -1636,7 +1726,8 @@ static NSString *validateSSID(NSString *ssid) {
     if (enabled) {
         enable_btstack_hci_logging();
         if (self.state == StateAwaitingPhone || self.state == StateActive) {
-            [self startNetworkDumpCapture];
+            [self presentAlertWithTitle:@"Diagnostics Enabled"
+                                message:@"Diagnostics will apply on next start. Stop and start Showcase again to capture full helper logs."];
         }
     } else {
         [self stopNetworkDumpCaptureWithReason:@"diagnostics disabled"];
@@ -1971,11 +2062,22 @@ static NSString *validateSSID(NSString *ssid) {
                       access("/tmp/hci_dump.pklg", F_OK) == 0 ? "yes" : "no"];
     [env appendFormat:@"tcpdump=%s\n", tcpdump_tool_path() ?: "(missing)"];
     [env appendFormat:@"latest_tcpdump=%@\n", [self latestNetworkDumpPath] ?: @"(none)"];
+    [env appendFormat:@"diagnostics_enabled=%@\n", self.diagnosticsEnabled ? @"yes" : @"no"];
+    [env appendFormat:@"helpers_full_logging_this_run=%@\n", self.helpersLoggedThisRun ? @"yes" : @"no"];
+    [env appendFormat:@"bt_ready_sentinel=%s exists=%s\n",
+                      BT_READY_PATH, access(BT_READY_PATH, F_OK) == 0 ? "yes" : "no"];
     [env writeToFile:[work stringByAppendingPathComponent:@"environment.txt"]
           atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
+    if (!self.helpersLoggedThisRun) {
+        NSString *warning = @"Diagnostics were enabled after this run or were disabled when helpers launched. Helper logs may be missing or limited. Reproduce once with diagnostics enabled before pressing Start.\n";
+        [warning writeToFile:[work stringByAppendingPathComponent:@"WARNING.txt"]
+                  atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+
     [self copyLogDirectoryToDiagnosticsDir:work];
     [self copyPath:@"/tmp/hci_dump.pklg" toDiagnosticsDir:work name:@"hci_dump.pklg"];
+    [self copyPath:@"/var/log/BTstack.log" toDiagnosticsDir:work name:@"BTstack.log"];
     [self copyPath:@TCPDUMP_LOG toDiagnosticsDir:work name:@"tcpdump.log"];
     [self copyPath:[NSString stringWithUTF8String:BTSTACK_PREFS]
   toDiagnosticsDir:work name:@"ch.ringwald.btstack.plist"];

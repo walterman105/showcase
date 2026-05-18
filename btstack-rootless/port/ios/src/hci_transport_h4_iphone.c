@@ -150,8 +150,11 @@ static int h4_open(void)
     int fd = socket(PF_NETGRAPH, SOCK_STREAM, NG_CONTROL);
     log_info("h4_open: open socket(%u, %u, %u) %d", PF_NETGRAPH, SOCK_STREAM, NG_CONTROL, fd);
     if (fd < 0) {
-        log_error("h4_open: open socket failed");
-        perror("socket(HCI_IF)");
+        int e = errno;
+        log_error("h4_open: socket failed domain=%d type=%d proto=%d errno=%d (%s)",
+                  PF_NETGRAPH, SOCK_STREAM, NG_CONTROL, e, strerror(e));
+        fprintf(stderr, "h4_open: socket failed domain=%d type=%d proto=%d errno=%d (%s)\n",
+                PF_NETGRAPH, SOCK_STREAM, NG_CONTROL, e, strerror(e));
         goto err_out0;
     }
     
@@ -163,8 +166,12 @@ static int h4_open(void)
     memset((void *) &ioctl_arg, 0x00, sizeof(struct ioctl_arg_t));
     strcpy((char *) &ioctl_arg.socket_name, SOCKET_DEVICE);
     if (ioctl(fd, SOCK_IOCTL_VAL, &ioctl_arg) != 0) {
-        log_error("h4_open: ioctl failed");
-        perror("ioctl(fd_sock, SOCK_IOCTL_VAL)");
+        int e = errno;
+        log_error("h4_open: ioctl failed device=%s cmd=0x%08x fd=%d errno=%d (%s)",
+                  SOCKET_DEVICE, SOCK_IOCTL_VAL, fd, e, strerror(e));
+        fprintf(stderr,
+                "h4_open: ioctl failed device=%s cmd=0x%08x fd=%d errno=%d (%s)\n",
+                SOCKET_DEVICE, SOCK_IOCTL_VAL, fd, e, strerror(e));
         goto err_out1;
     }
     
@@ -178,8 +185,11 @@ static int h4_open(void)
     
     // connect
     if (connect(fd, (const struct sockaddr *) &sock_addr, sizeof(struct sockaddr_ng)) != 0) {
-        log_error("h4_open: connect failed");
-        perror("connect(fd_sock)");
+        int e = errno;
+        log_error("h4_open: connect failed device=%s fd=%d node=%u errno=%d (%s)",
+                  SOCKET_DEVICE, fd, ioctl_arg.result, e, strerror(e));
+        fprintf(stderr, "h4_open: connect failed device=%s fd=%d node=%u errno=%d (%s)\n",
+                SOCKET_DEVICE, fd, ioctl_arg.result, e, strerror(e));
         goto err_out2;
     }
     log_info("h4_open: connect to socket ok");
@@ -192,8 +202,11 @@ static int h4_open(void)
     int err = getsockopt(fd, SO_ACCEPTCONN, GETSOCKOPT_VAL, &toptions, &toptions_len);
     log_info("h4_open: -> err %d, options_len %u", err, toptions_len);
     if (err) {
-        log_error("h4_open: getsockopt failed with errno %d", errno);
-        perror("getsockopt(fd_sock)");
+        int e = errno;
+        log_error("h4_open: getsockopt failed fd=%d level=%d opt=0x%08x errno=%d (%s)",
+                  fd, SO_ACCEPTCONN, GETSOCKOPT_VAL, e, strerror(e));
+        fprintf(stderr, "h4_open: getsockopt failed fd=%d level=%d opt=0x%08x errno=%d (%s)\n",
+                fd, SO_ACCEPTCONN, GETSOCKOPT_VAL, e, strerror(e));
         goto err_out3;
     }
 
@@ -218,8 +231,11 @@ static int h4_open(void)
     log_info("h4_open: setsockopt (fd, %d, %x, buffer, %u)", SO_ACCEPTCONN, SETSOCKOPT_VAL, toptions_len);
     err = setsockopt(fd, SO_ACCEPTCONN, SETSOCKOPT_VAL, &toptions, toptions_len);
     if (err) {
-        log_error("h4_open: setsockopt failed with errno %d", errno);
-        perror("setsockopt(fd_sock)");
+        int e = errno;
+        log_error("h4_open: setsockopt failed fd=%d level=%d opt=0x%08x errno=%d (%s)",
+                  fd, SO_ACCEPTCONN, SETSOCKOPT_VAL, e, strerror(e));
+        fprintf(stderr, "h4_open: setsockopt failed fd=%d level=%d opt=0x%08x errno=%d (%s)\n",
+                fd, SO_ACCEPTCONN, SETSOCKOPT_VAL, e, strerror(e));
         goto err_out4;
     }
         
@@ -283,7 +299,9 @@ static int h4_send_packet(uint8_t packet_type, uint8_t * packet, int size){
     while (size > 0) {
         int bytes_written = write(hci_transport_h4->uart_fd, data, size);
         if (bytes_written < 0) {
-            log_error("h4_send_packet: write body failed errno %d", errno);
+            int e = errno;
+            log_error("h4_send_packet: write body failed fd=%d errno=%d (%s)",
+                      hci_transport_h4->uart_fd, e, strerror(e));
             usleep(5000);
             continue;
         }
@@ -349,7 +367,9 @@ static void h4_process(btstack_data_source_t *ds, btstack_data_source_callback_t
     // read up to bytes_to_read data in
     ssize_t bytes_read = read(hci_transport_h4->uart_fd, &hci_packet[read_pos], read_now);
     if (bytes_read < 0) {
-        log_error("h4_process: read failed errno %d", errno);
+        int e = errno;
+        log_error("h4_process: read failed fd=%d errno=%d (%s)",
+                  hci_transport_h4->uart_fd, e, strerror(e));
         return;
     }
         
@@ -366,6 +386,14 @@ static void h4_enforce_wake_on(void){
     
     if (!enforce_wake_fd) {
         enforce_wake_fd = open(enforce_wake_device, O_RDWR);
+        if (enforce_wake_fd < 0) {
+            int e = errno;
+            log_error("h4_enforce_wake_on: open failed path=%s errno=%d (%s)",
+                      enforce_wake_device, e, strerror(e));
+            fprintf(stderr, "h4_enforce_wake_on: open failed path=%s errno=%d (%s)\n",
+                    enforce_wake_device, e, strerror(e));
+            enforce_wake_fd = 0;
+        }
         usleep(HCI_WAKE_DURATION);  // wait until device is ready
     }
     btstack_run_loop_remove_timer(&hci_transport_h4->sleep_timer);

@@ -11,6 +11,8 @@ BTSTACK_DAEMON="$PAYLOAD_ROOTLESS/usr/bin/BTdaemon"
 if [ ! -f "$BTSTACK_DAEMON" ]; then
   BTSTACK_DAEMON="$PAYLOAD/usr/bin/BTdaemon"
 fi
+BTSTACK_SOURCE_DIR="$REPO_ROOT/btstack-rootless"
+BTSTACK_SOURCE_BUILD="$BTSTACK_SOURCE_DIR/build_btdaemon.sh"
 BTSTACK_PLIST="$PAYLOAD/Library/LaunchDaemons/ch.ringwald.BTstack.plist"
 BUILD="$ROOT/build"
 REMOTE_BASE="${REMOTE_BASE:-/tmp/showcase-rootless-deb-build}"
@@ -81,7 +83,9 @@ ARCH="$(field Architecture)"
 DEB_NAME="${PKG}_${VER}_${ARCH}.deb"
 
 need_file "$BTSTACK_DYLIB"
-need_file "$BTSTACK_DAEMON"
+if [ ! -x "$BTSTACK_SOURCE_BUILD" ]; then
+  need_file "$BTSTACK_DAEMON"
+fi
 need_file "$BTSTACK_PLIST"
 need_file "$REPO_ROOT/source/Showcase.m"
 need_file "$REPO_ROOT/source/carplay_bt.m"
@@ -137,6 +141,10 @@ cp "$REPO_ROOT/source/Showcase.m" \
    "$REPO_ROOT/source/ent_svc.xml" \
    "$WORK/send/"
 cp "$BTSTACK_DYLIB" "$WORK/send/libBTstack.dylib"
+if [ -x "$BTSTACK_SOURCE_BUILD" ]; then
+  COPYFILE_DISABLE=1 tar --format ustar -C "$BTSTACK_SOURCE_DIR" \
+    -cf "$WORK/send/btstack-rootless.tar" .
+fi
 
 sshpass -p "$IPAD_PASS" ssh "${SSH_OPTS[@]}" "$IPAD_USER@$IPAD_HOST" \
   "if [ \"\$(id -u)\" != 0 ]; then printf '%s\n' '$IPAD_PASS' | sudo -S rm -rf '$REMOTE_BASE'; else rm -rf '$REMOTE_BASE'; fi && mkdir -p '$REMOTE_BASE'"
@@ -148,6 +156,15 @@ sshpass -p "$IPAD_PASS" scp "${SCP_OPTS[@]}" \
 sshpass -p "$IPAD_PASS" ssh "${SSH_OPTS[@]}" "$IPAD_USER@$IPAD_HOST" "
 set -e
 cd '$REMOTE_BASE'
+
+if [ -f btstack-rootless.tar ]; then
+    rm -rf btstack-rootless
+    mkdir -p btstack-rootless
+    tar -C btstack-rootless -xf btstack-rootless.tar
+    chmod +x btstack-rootless/build_btdaemon.sh
+    SDK='$SDK_REMOTE' ENT='$REMOTE_BASE/ent_btdaemon.xml' OUT='$REMOTE_BASE/BTdaemon' \
+        btstack-rootless/build_btdaemon.sh
+fi
 
 clang -fobjc-arc -DSHOWCASE_ROOTLESS=1 -isysroot '$SDK_REMOTE' \
     -o Showcase Showcase.m \
@@ -177,6 +194,11 @@ for bin in Showcase carplay_bt carplay_services; do
     "$IPAD_USER@$IPAD_HOST:$REMOTE_BASE/$bin" \
     "$WORK/rootfs/var/jb/Applications/Showcase.app/$bin"
 done
+if [ -x "$BTSTACK_SOURCE_BUILD" ]; then
+  sshpass -p "$IPAD_PASS" scp "${SCP_OPTS[@]}" \
+    "$IPAD_USER@$IPAD_HOST:$REMOTE_BASE/BTdaemon" \
+    "$WORK/rootfs/var/jb/usr/bin/BTdaemon"
+fi
 mv "$WORK/rootfs/var/jb/Applications/Showcase.app/carplay_bt" \
    "$WORK/rootfs/var/jb/Applications/Showcase.app/CarDisplaySim"
 mv "$WORK/rootfs/var/jb/Applications/Showcase.app/carplay_services" \
@@ -188,7 +210,9 @@ cp "$REPO_ROOT/source/ent_bt.xml" "$WORK/rootfs/var/jb/usr/share/showcase/ent_bt
 cp "$REPO_ROOT/source/ent_svc.xml" "$WORK/rootfs/var/jb/usr/share/showcase/ent_svc.xml"
 cp "$REPO_ROOT/source/ent_btdaemon.xml" "$WORK/rootfs/var/jb/usr/share/showcase/ent_btdaemon.xml"
 cp "$REPO_ROOT/icon/generated/"*.png "$WORK/rootfs/var/jb/Applications/Showcase.app/"
-copy_arm64_binary "$BTSTACK_DAEMON" "$WORK/rootfs/var/jb/usr/bin/BTdaemon"
+if [ ! -x "$BTSTACK_SOURCE_BUILD" ]; then
+  copy_arm64_binary "$BTSTACK_DAEMON" "$WORK/rootfs/var/jb/usr/bin/BTdaemon"
+fi
 copy_arm64_binary "$BTSTACK_DYLIB" "$WORK/rootfs/var/jb/usr/lib/libBTstack.dylib"
 sed 's#/usr/bin/BTdaemon#/var/jb/usr/bin/BTdaemon#g' \
   "$BTSTACK_PLIST" > "$WORK/rootfs/var/jb/Library/LaunchDaemons/ch.ringwald.BTstack.plist"

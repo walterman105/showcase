@@ -1202,10 +1202,31 @@ static void handle_options(int sock, const HTTPReq *r) {
  *  2) Stream setup (has "streams" array): allocate data/control ports
  * ═══════════════════════════════════════════════════════════════ */
 
-/* Helper: bind a UDP socket to any port and return (fd, port) */
-static int bind_udp_port(uint16_t *outPort) {
+static const char *addr_family_name(int family) {
+    switch (family) {
+        case AF_INET: return "IPv4";
+        case AF_INET6: return "IPv6";
+        default: return "unknown";
+    }
+}
+
+static bool sockaddr_to_numeric(const struct sockaddr *sa, socklen_t slen,
+                                char *host, size_t hostLen,
+                                char *serv, size_t servLen) {
+    int rc = getnameinfo(sa, slen, host, (socklen_t)hostLen,
+                         serv, (socklen_t)servLen,
+                         NI_NUMERICHOST | NI_NUMERICSERV);
+    if (rc == 0) return true;
+    snprintf(host, hostLen, "(getnameinfo:%d)", rc);
+    if (serv && servLen) snprintf(serv, servLen, "0");
+    return false;
+}
+
+static int bind_udp_port_ipv4(uint16_t *outPort) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
@@ -1215,11 +1236,60 @@ static int bind_udp_port(uint16_t *outPort) {
     socklen_t sl = sizeof(sa);
     getsockname(fd, (struct sockaddr *)&sa, &sl);
     *outPort = ntohs(sa.sin_port);
-    return fd;
+    printf("[NET] bound UDP IPv4 fallback port %u fd=%d\n", *outPort, fd);
+    return false;
 }
 
-/* Helper: bind a TCP listen socket to any port and return (fd, port) */
-static int bind_tcp_port(uint16_t *outPort) {
+/* Helper: bind a UDP socket to any port and return (fd, port). */
+static int bind_udp_port(uint16_t *outPort) {
+    int savedErrno = 0;
+    int fd = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+        int no = 0;
+        int yes = 1;
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) != 0) {
+            savedErrno = errno;
+            printf("[NET] WARN: UDP IPV6_V6ONLY=0 failed errno=%d (%s)\n",
+                   savedErrno, strerror(savedErrno));
+            close(fd);
+            goto udp_fallback;
+        }
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+        struct sockaddr_in6 sa6;
+        memset(&sa6, 0, sizeof(sa6));
+        sa6.sin6_family = AF_INET6;
+        sa6.sin6_addr = in6addr_any;
+        sa6.sin6_port = 0;
+        if (bind(fd, (struct sockaddr *)&sa6, sizeof(sa6)) == 0) {
+            socklen_t sl = sizeof(sa6);
+            if (getsockname(fd, (struct sockaddr *)&sa6, &sl) == 0) {
+                *outPort = ntohs(sa6.sin6_port);
+                printf("[NET] bound UDP dual-stack port %u fd=%d\n", *outPort, fd);
+                return fd;
+            }
+            savedErrno = errno;
+            printf("[NET] WARN: dual-stack UDP getsockname failed errno=%d (%s)\n",
+                   savedErrno, strerror(savedErrno));
+        } else {
+            savedErrno = errno;
+            printf("[NET] WARN: dual-stack UDP bind failed errno=%d (%s)\n",
+                   savedErrno, strerror(savedErrno));
+        }
+        close(fd);
+    } else {
+        savedErrno = errno;
+        printf("[NET] WARN: dual-stack UDP socket failed errno=%d (%s)\n",
+               savedErrno, strerror(savedErrno));
+    }
+
+udp_fallback:
+    printf("[NET] WARN: dual-stack UDP bind failed errno=%d (%s), falling back to IPv4\n",
+           savedErrno, strerror(savedErrno));
+    return bind_udp_port_ipv4(outPort);
+}
+
+static int bind_tcp_port_ipv4(uint16_t *outPort) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int yes = 1;
@@ -1234,7 +1304,119 @@ static int bind_tcp_port(uint16_t *outPort) {
     socklen_t sl = sizeof(sa);
     getsockname(fd, (struct sockaddr *)&sa, &sl);
     *outPort = ntohs(sa.sin_port);
-    return fd;
+    printf("[NET] bound TCP IPv4 fallback port %u fd=%d\n", *outPort, fd);
+    return false;
+}
+
+/* Helper: bind a TCP listen socket to any port and return (fd, port) */
+static int bind_tcp_port(uint16_t *outPort) {
+    int savedErrno = 0;
+    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        int no = 0;
+        int yes = 1;
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) != 0) {
+            savedErrno = errno;
+            printf("[NET] WARN: TCP IPV6_V6ONLY=0 failed errno=%d (%s)\n",
+                   savedErrno, strerror(savedErrno));
+            close(fd);
+            goto tcp_fallback;
+        }
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+        struct sockaddr_in6 sa6;
+        memset(&sa6, 0, sizeof(sa6));
+        sa6.sin6_family = AF_INET6;
+        sa6.sin6_addr = in6addr_any;
+        sa6.sin6_port = 0;
+        if (bind(fd, (struct sockaddr *)&sa6, sizeof(sa6)) == 0) {
+            if (listen(fd, 1) == 0) {
+                socklen_t sl = sizeof(sa6);
+                if (getsockname(fd, (struct sockaddr *)&sa6, &sl) == 0) {
+                    *outPort = ntohs(sa6.sin6_port);
+                    printf("[NET] bound TCP dual-stack port %u fd=%d\n", *outPort, fd);
+                    return fd;
+                }
+                savedErrno = errno;
+                printf("[NET] WARN: dual-stack TCP getsockname failed errno=%d (%s)\n",
+                       savedErrno, strerror(savedErrno));
+            } else {
+                savedErrno = errno;
+                printf("[NET] WARN: dual-stack TCP listen failed errno=%d (%s)\n",
+                       savedErrno, strerror(savedErrno));
+            }
+        } else {
+            savedErrno = errno;
+            printf("[NET] WARN: dual-stack TCP bind failed errno=%d (%s)\n",
+                   savedErrno, strerror(savedErrno));
+        }
+        close(fd);
+    } else {
+        savedErrno = errno;
+        printf("[NET] WARN: dual-stack TCP socket failed errno=%d (%s)\n",
+               savedErrno, strerror(savedErrno));
+    }
+
+tcp_fallback:
+    printf("[NET] WARN: dual-stack TCP bind failed errno=%d (%s), falling back to IPv4\n",
+           savedErrno, strerror(savedErrno));
+    return bind_tcp_port_ipv4(outPort);
+}
+
+static bool build_peer_sockaddr(const char *host, uint16_t port,
+                                struct sockaddr_storage *out,
+                                socklen_t *outLen,
+                                char *display, size_t displayLen) {
+    if (!host || !*host || !out || !outLen) return false;
+
+    char addr[NI_MAXHOST];
+    char scope[IF_NAMESIZE];
+    memset(addr, 0, sizeof(addr));
+    memset(scope, 0, sizeof(scope));
+    snprintf(addr, sizeof(addr), "%s", host);
+
+    char *pct = strchr(addr, '%');
+    if (pct) {
+        *pct = '\0';
+        snprintf(scope, sizeof(scope), "%s", pct + 1);
+    }
+
+    memset(out, 0, sizeof(*out));
+    struct sockaddr_in *sin = (struct sockaddr_in *)out;
+    sin->sin_family = AF_INET;
+    sin->sin_port = htons(port);
+    if (inet_pton(AF_INET, addr, &sin->sin_addr) == 1) {
+        *outLen = sizeof(struct sockaddr_in);
+        if (display && displayLen) snprintf(display, displayLen, "%s", addr);
+        return true;
+    }
+
+    struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)out;
+    memset(sin6, 0, sizeof(*sin6));
+    sin6->sin6_family = AF_INET6;
+    sin6->sin6_port = htons(port);
+    if (inet_pton(AF_INET6, addr, &sin6->sin6_addr) == 1) {
+        if (scope[0]) {
+            sin6->sin6_scope_id = if_nametoindex(scope);
+            if (sin6->sin6_scope_id == 0) {
+                printf("[TIMING] WARN: scope interface '%s' not found for %s\n",
+                       scope, host);
+            }
+        } else if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr)) {
+            sin6->sin6_scope_id = if_nametoindex("bridge100");
+            if (sin6->sin6_scope_id) snprintf(scope, sizeof(scope), "bridge100");
+            printf("[TIMING] IPv6 link-local had no scope; using bridge100 scope_id=%u\n",
+                   sin6->sin6_scope_id);
+        }
+        *outLen = sizeof(struct sockaddr_in6);
+        if (display && displayLen) {
+            if (scope[0]) snprintf(display, displayLen, "%s%%%s", addr, scope);
+            else snprintf(display, displayLen, "%s", addr);
+        }
+        return true;
+    }
+
+    return false;
 }
 
 /* Session state */
@@ -1317,11 +1499,18 @@ static void timing_thread_func(void *ctx) {
             continue;
         }
 
+        char fromHost[NI_MAXHOST] = {0};
+        char fromPort[NI_MAXSERV] = {0};
+        sockaddr_to_numeric((struct sockaddr *)&from, fromLen,
+                            fromHost, sizeof(fromHost),
+                            fromPort, sizeof(fromPort));
+
         uint8_t pt = buf[1];
 
         if (pt == 210) {
             /* Timing request from iPhone — build response */
-            printf("[TIMING] Received timing REQUEST (%zd bytes)\n", n);
+            printf("[TIMING] Received timing REQUEST (%zd bytes) from %s:%s family=%s\n",
+                   n, fromHost, fromPort, addr_family_name(from.ss_family));
 
             uint32_t recvSec, recvFrac;
             get_ntp_time(&recvSec, &recvFrac);
@@ -1358,11 +1547,13 @@ static void timing_thread_func(void *ctx) {
 
             ssize_t sent = sendto(g_timing_fd, resp, 32, 0,
                                   (struct sockaddr *)&from, fromLen);
-            printf("[TIMING] Sent NTP response (%zd bytes)\n", sent);
+            printf("[TIMING] Sent NTP response (%zd bytes) to %s:%s family=%s\n",
+                   sent, fromHost, fromPort, addr_family_name(from.ss_family));
         } else if (pt == 211) {
             /* Timing response from iPhone to our negotiation request */
             g_timing_sync_count++;
-            printf("[TIMING] Received timing RESPONSE (pt=211) — sync #%d\n",
+            printf("[TIMING] Received timing RESPONSE (pt=211) from %s:%s family=%s sync #%d\n",
+                   fromHost, fromPort, addr_family_name(from.ss_family),
                    g_timing_sync_count);
         } else {
             printf("[TIMING] Unknown packet type %u (%zd bytes)\n", pt, n);
@@ -1409,9 +1600,10 @@ static void event_thread_func(void *ctx) {
         }
 
         char host[NI_MAXHOST], serv[NI_MAXSERV];
-        getnameinfo((struct sockaddr *)&ca, cl, host, sizeof(host),
-                    serv, sizeof(serv), NI_NUMERICHOST | NI_NUMERICSERV);
-        printf("[EVENT] *** Connection from %s:%s ***\n", host, serv);
+        sockaddr_to_numeric((struct sockaddr *)&ca, cl,
+                            host, sizeof(host), serv, sizeof(serv));
+        printf("[EVENT] *** Connection from %s:%s family=%s ***\n",
+               host, serv, addr_family_name(ca.ss_family));
         fflush(stdout);
 
         g_event_client_fd = client;
@@ -1731,7 +1923,7 @@ static void *screen_thread_func(void *arg) {
            g_screen_data_port, g_screen_listen_fd);
     fflush(stdout);
 
-    struct sockaddr_in peer;
+    struct sockaddr_storage peer;
     socklen_t peerLen = sizeof(peer);
     int clientFd = accept(g_screen_listen_fd, (struct sockaddr *)&peer, &peerLen);
     if (clientFd < 0) {
@@ -1742,9 +1934,12 @@ static void *screen_thread_func(void *arg) {
     close(g_screen_listen_fd);
     g_screen_listen_fd = -1;
 
-    char peerIP[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &peer.sin_addr, peerIP, sizeof(peerIP));
-    printf("[SCREEN] *** Connected from %s:%u ***\n", peerIP, ntohs(peer.sin_port));
+    char peerIP[NI_MAXHOST] = {0};
+    char peerPort[NI_MAXSERV] = {0};
+    sockaddr_to_numeric((struct sockaddr *)&peer, peerLen,
+                        peerIP, sizeof(peerIP), peerPort, sizeof(peerPort));
+    printf("[SCREEN] *** Connected from %s:%s family=%s ***\n",
+           peerIP, peerPort, addr_family_name(peer.ss_family));
 
     int rcvBuf = 512 * 1024;
     setsockopt(clientFd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(rcvBuf));
@@ -1923,18 +2118,23 @@ static bool timing_negotiate_blocking(void) {
         return false;
     }
 
-    printf("[TIMING-NEG] Starting BLOCKING negotiation → %s:%u\n",
+    printf("[TIMING-NEG] Starting BLOCKING negotiation -> %s:%u\n",
            g_iphone_ip, g_iphone_timing_port);
     fflush(stdout);
 
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(g_iphone_timing_port);
-    if (inet_pton(AF_INET, g_iphone_ip, &dest.sin_addr) != 1) {
-        printf("[TIMING-NEG] inet_pton failed for %s\n", g_iphone_ip);
+    struct sockaddr_storage dest;
+    socklen_t destLen = 0;
+    char destDisplay[NI_MAXHOST + IF_NAMESIZE + 4];
+    memset(destDisplay, 0, sizeof(destDisplay));
+    if (!build_peer_sockaddr(g_iphone_ip, g_iphone_timing_port,
+                             &dest, &destLen,
+                             destDisplay, sizeof(destDisplay))) {
+        printf("[TIMING] WARN: could not parse timing destination %s; waiting for client timing packets\n",
+               g_iphone_ip);
         return false;
     }
+    printf("[TIMING] negotiate destination %s %s port=%u\n",
+           addr_family_name(dest.ss_family), destDisplay, g_iphone_timing_port);
 
     g_timing_sync_count = 0;
 
@@ -1961,8 +2161,13 @@ static bool timing_negotiate_blocking(void) {
         pkt[31] = (frac >>  0) & 0xFF;
 
         ssize_t sent = sendto(g_timing_fd, pkt, 32, 0,
-                              (struct sockaddr *)&dest, sizeof(dest));
-        printf("[TIMING-NEG] Sent NTP request %d/5 (%zd bytes)\n", i + 1, sent);
+                              (struct sockaddr *)&dest, destLen);
+        if (sent < 0) {
+            printf("[TIMING] WARN: sendto failed for %s errno=%d (%s); waiting for client timing packets\n",
+                   destDisplay, errno, strerror(errno));
+        } else {
+            printf("[TIMING-NEG] Sent NTP request %d/5 (%zd bytes)\n", i + 1, sent);
+        }
         fflush(stdout);
 
         /* Wait 100ms between requests */
@@ -2024,14 +2229,16 @@ static void handle_rtsp_setup(int sock, const HTTPReq *r) {
             struct sockaddr_storage peerAddr;
             socklen_t peerLen = sizeof(peerAddr);
             if (getpeername(sock, (struct sockaddr *)&peerAddr, &peerLen) == 0) {
-                char host[NI_MAXHOST];
-                getnameinfo((struct sockaddr *)&peerAddr, peerLen,
-                           host, sizeof(host), NULL, 0, NI_NUMERICHOST);
+                char host[NI_MAXHOST] = {0};
+                char serv[NI_MAXSERV] = {0};
+                sockaddr_to_numeric((struct sockaddr *)&peerAddr, peerLen,
+                                    host, sizeof(host), serv, sizeof(serv));
                 /* Strip ::ffff: prefix for IPv4-mapped IPv6 */
                 const char *ip = host;
                 if (strncmp(ip, "::ffff:", 7) == 0) ip += 7;
                 snprintf(g_iphone_ip, sizeof(g_iphone_ip), "%s", ip);
-                printf("[AP] iPhone IP: %s\n", g_iphone_ip);
+                printf("[AP] iPhone IP: %s (family=%s peer_port=%s)\n",
+                       g_iphone_ip, addr_family_name(peerAddr.ss_family), serv);
             }
 
             /* Allocate control ports if not already done */
@@ -2058,7 +2265,7 @@ static void handle_rtsp_setup(int sock, const HTTPReq *r) {
                 respDict[@"keepAlivePort"] = @(g_keepalive_port);
             }
 
-            printf("[AP] SETUP response: timingPort=%u eventPort=%u keepAlivePort=%u\n",
+            printf("[AP] SETUP response: timingPort=%u eventPort=%u keepAlivePort=%u (dual-stack when available)\n",
                    g_timing_port, g_event_port, g_keepalive_port);
 
         } else {
@@ -2082,6 +2289,8 @@ static void handle_rtsp_setup(int sock, const HTTPReq *r) {
                  * type 100 = alt audio, others = UDP */
                 if (type == 110) {
                     dataFd = bind_tcp_port(&dataPort);
+                    printf("[NET] screen/video dataPort=%u fd=%d dual-stack when available\n",
+                           dataPort, dataFd);
 
                     /* Save screen stream state for screen thread */
                     g_screen_listen_fd = dataFd;
@@ -2105,6 +2314,8 @@ static void handle_rtsp_setup(int sock, const HTTPReq *r) {
                     app_send_status(STATUS_STREAM_SETUP);
                 } else {
                     dataFd = bind_udp_port(&dataPort);
+                    printf("[NET] audio/aux UDP dataPort=%u fd=%d dual-stack when available\n",
+                           dataPort, dataFd);
                 }
                 rs[@"dataPort"] = @(dataPort);
 
@@ -2115,7 +2326,7 @@ static void handle_rtsp_setup(int sock, const HTTPReq *r) {
                     rs[@"controlPort"] = @(ctrlPort);
                     /* Keep control fd alive — just log for now */
                     if (ctrlFd >= 0) {
-                        printf("[AP] SETUP stream type=%d controlPort=%u (fd=%d, kept open)\n",
+                        printf("[AP] SETUP stream type=%d controlPort=%u (fd=%d, kept open, dual-stack when available)\n",
                                type, ctrlPort, ctrlFd);
                     }
                 }
@@ -2554,9 +2765,10 @@ static bool start_airplay_server(uint16_t port) {
             if (c < 0) { perror("[AP] accept"); continue; }
 
             char host[NI_MAXHOST], serv[NI_MAXSERV];
-            getnameinfo((struct sockaddr *)&ca, cl, host, sizeof(host),
-                        serv, sizeof(serv), NI_NUMERICHOST | NI_NUMERICSERV);
-            printf("\n[AP] *** NEW CONNECTION from %s:%s ***\n", host, serv);
+            sockaddr_to_numeric((struct sockaddr *)&ca, cl,
+                                host, sizeof(host), serv, sizeof(serv));
+            printf("\n[AP] *** NEW CONNECTION from %s:%s family=%s ***\n",
+                   host, serv, addr_family_name(ca.ss_family));
             fflush(stdout);
             app_send_status(STATUS_IPHONE_CONNECTED);
 

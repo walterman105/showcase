@@ -40,6 +40,8 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <signal.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <time.h>
 #include <dlfcn.h>
@@ -55,6 +57,7 @@ static char kWifiSSID[64]      = "RoadLink-CarPlay";
 static char kWifiPassword[64]  = "roadlink1234";
 static const uint8_t kWifiSecurityType = 2;   /* 0=None, 1=WEP, 2=WPA/WPA2 */
 static const uint8_t kWifiChannel      = 1;   /* iPad hotspot is on channel 1 */
+#define BT_READY_PATH "/tmp/showcase_bt_ready"
 /* AP BSSID (ap1 MAC — locally administered version of WiFi MAC) */
 static const uint8_t kApBSSID[6] = { 0xB2, 0xB9, 0x31, 0xAC, 0x86, 0x9F };
 
@@ -373,6 +376,15 @@ static void perform_bt_setup(void) {
     bt_send_cmd(&sdp_register_service_record,did_sdp_rec);
     bt_send_cmd(&btstack_set_discoverable,1);
     printf("[CP] READY — identity: RoadLink / RL-100 / RoadLink Labs\n");
+    int ready_fd = open(BT_READY_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (ready_fd >= 0) {
+        dprintf(ready_fd, "ready\n");
+        close(ready_fd);
+        printf("[BT] ready sentinel written path=%s\n", BT_READY_PATH);
+    } else {
+        printf("[BT] WARN: ready sentinel write failed path=%s errno=%d (%s)\n",
+               BT_READY_PATH, errno, strerror(errno));
+    }
 }
 
 /* ═══════════════════════════════════════════════
@@ -1069,6 +1081,14 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
         packet_debug_count++;
     }
 
+    if(type==4 && sz>=1 && pkt[0]==0x62) {
+        printf("[BT] FATAL: BTSTACK_EVENT_POWERON_FAILED\n");
+        fflush(stdout);
+        fflush(stderr);
+        unlink(BT_READY_PATH);
+        exit(62);
+    }
+
     if(type==4&&pkt[0]==0x6c) return;
 
     if(type==7) {
@@ -1249,6 +1269,7 @@ int main(int argc, char *argv[]) {
      * fully-buffered when stdout is a file, which loses everything). */
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
+    unlink(BT_READY_PATH);
     parse_args(argc, argv);
     @autoreleasepool {
         printf("[CP] Showcase / carplay_bt\n");
