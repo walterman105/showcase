@@ -78,7 +78,7 @@ static void ip_log_open(void) {
  * ═══════════════════════════════════════════════════════════════ */
 
 #define APP_NAME          "Showcase"
-#define APP_VERSION       "1.0 beta 2-18"
+#define APP_VERSION       "1.0 beta 2-19"
 #define APP_AUTHOR        "Amine Rostane"
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
 #define BLUETOOTHD_PLIST  "/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
@@ -1371,7 +1371,6 @@ static NSString *validateSSID(NSString *ssid) {
 #endif
     sleep(2);
 
-#ifdef SHOWCASE_ROOTLESS
     /* 2. Start bundled BTstack through launchd so the advertised socket exists. */
     char *unloadBTstackArgv[] = { (char*)"launchctl", (char*)"unload",
                                   (char*)BTSTACK_PLIST, NULL };
@@ -1390,15 +1389,6 @@ static NSString *validateSSID(NSString *ssid) {
         return;
     }
     self.btdaemonPid = 0;
-#else
-    /* 2. Spawn BTdaemon */
-    char *btdArgv[] = { (char*)"BTdaemon", NULL };
-    self.btdaemonPid = spawn_daemon(BTDAEMON_PATH, btdArgv,
-                                    LOG_DIR "/btdaemon.log");
-    if (self.btdaemonPid <= 0) { [self failWith:@"BTdaemon failed to start"]; return; }
-    sleep(3);
-    if (!pid_alive(self.btdaemonPid)) { [self failWith:@"BTdaemon exited early"]; return; }
-#endif
 
     /* 3. Spawn carplay_bt with car name + global AP creds */
     char nameBuf[64], ssidBuf[128], passBuf[128];
@@ -1469,20 +1459,14 @@ static NSString *validateSSID(NSString *ssid) {
 
         kill_pid(self.carplayServicesPid); self.carplayServicesPid = 0;
         kill_pid(self.carplayBtPid);       self.carplayBtPid = 0;
-#ifdef SHOWCASE_ROOTLESS
         self.btdaemonPid = 0;
-#else
-        kill_pid(self.btdaemonPid);        self.btdaemonPid = 0;
-#endif
 
         const char *launchctl = launchctl_path();
         if (launchctl) {
-#ifdef SHOWCASE_ROOTLESS
             char *unloadBTstackArgv[] = { (char*)"launchctl", (char*)"unload",
                                           (char*)BTSTACK_PLIST, NULL };
             run_blocking(launchctl, unloadBTstackArgv);
             unlink(BTSTACK_SOCKET);
-#endif
             char *loadArgv[] = { (char*)"launchctl", (char*)"load",
                                  (char*)BLUETOOTHD_PLIST, NULL };
             run_blocking(launchctl, loadArgv);
