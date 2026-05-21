@@ -56,10 +56,21 @@ static char kDeviceName[32]    = "RoadLink";
 static char kWifiSSID[64]      = "RoadLink-CarPlay";
 static char kWifiPassword[64]  = "roadlink1234";
 static const uint8_t kWifiSecurityType = 2;   /* 0=None, 1=WEP, 2=WPA/WPA2 */
-static const uint8_t kWifiChannel      = 1;   /* iPad hotspot is on channel 1 */
 #define BT_READY_PATH "/tmp/showcase_bt_ready"
-/* AP BSSID (ap1 MAC — locally administered version of WiFi MAC) */
-static const uint8_t kApBSSID[6] = { 0xB2, 0xB9, 0x31, 0xAC, 0x86, 0x9F };
+
+#ifndef SHOWCASE_SEND_WIFI_CHANNEL
+#define SHOWCASE_SEND_WIFI_CHANNEL 0
+#endif
+
+#ifndef SHOWCASE_SEND_WIFI_BSSID
+#define SHOWCASE_SEND_WIFI_BSSID 0
+#endif
+
+#define WIFI_CONFIG_MAX_SENDS 5
+
+static int g_wifi_channel = 0;          /* 0 = unknown / omit */
+static uint8_t g_ap_bssid[6] = {0};
+static int g_have_ap_bssid = 0;
 
 static void parse_args(int argc, char *argv[]) {
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -146,10 +157,16 @@ static int wifi_config_sent_pre_transport = 0;
 static int wifi_config_sent_post_transport = 0;
 static int wireless_carplay_connecting_seen = 0;
 static int wifi_config_request_count = 0;
+static int wifi_config_send_count = 0;
+static int wifi_config_retry_count = 0;
+static int mfi_auth_succeeded = 0;
+static int handoff_watchdog_armed = 0;
+static unsigned int handoff_generation = 0;
 static char wifi_ipv6[INET6_ADDRSTRLEN] = "";
 static int packet_debug_count = 0;
 
 static void reset_wireless_handoff_state(void) {
+    handoff_generation++;
     wifi_config_sent = 0;
     start_session_sent = 0;
     wifi_config_requested = 0;
@@ -158,6 +175,10 @@ static void reset_wireless_handoff_state(void) {
     wifi_config_sent_post_transport = 0;
     wireless_carplay_connecting_seen = 0;
     wifi_config_request_count = 0;
+    wifi_config_send_count = 0;
+    wifi_config_retry_count = 0;
+    mfi_auth_succeeded = 0;
+    handoff_watchdog_armed = 0;
     wifi_ipv6[0] = '\0';
 }
 
@@ -480,14 +501,21 @@ static void send_auth_response(uint8_t *chal, int clen) {
 /* ═══════════════════════════════════════════════
  *  0x5703: AccessoryWiFiConfigurationInformation
  *
- *  v37: Added BSSID param so iPhone knows which AP to join
+ *  Default payload is intentionally minimal and truthful.
  *    Param 0x0001 = SSID (UTF-8 + NUL)
  *    Param 0x0002 = Passphrase (UTF-8 + NUL)
  *    Param 0x0003 = SecurityType (1 byte enum)
- *    Param 0x0004 = Channel (1 byte)
- *    Param 0x0005 = AccessoryBSSID (6 bytes, AP MAC)
+ *    Param 0x0004 = Channel (debug only, when discovered)
+ *    Param 0x0005 = AccessoryBSSID (debug only, when discovered)
  * ═══════════════════════════════════════════════ */
-static void send_accessory_wifi_config(const char *phase) {
+static int send_accessory_wifi_config(const char *phase) {
+    if (wifi_config_send_count >= WIFI_CONFIG_MAX_SENDS) {
+        printf("[WIFI] 0x5702 retry ignored: max Wi-Fi config sends reached count=%d\n",
+               wifi_config_send_count);
+        fflush(stdout);
+        return 0;
+    }
+
     PB pb; pb_init(&pb, 256);
 
     /* Param 1: SSID — NUL-terminated UTF-8 */
@@ -499,27 +527,77 @@ static void send_accessory_wifi_config(const char *phase) {
     /* Param 3: SecurityType — 1 byte (0=None, 1=WEP, 2=WPA/WPA2) */
     pb_u8(&pb, 0x0003, kWifiSecurityType);
 
-    /* Param 4: Channel — 1 byte */
-    pb_u8(&pb, 0x0004, kWifiChannel);
+    char channel_log[32];
+    char bssid_log[64];
+    strcpy(channel_log, "omitted");
+    strcpy(bssid_log, "omitted");
 
-    /* v38: REMOVED BSSID param (0x0005) — not in wiomoc reference impl.
-     * iPhone may reject messages with unexpected/unknown params. */
+#if SHOWCASE_SEND_WIFI_CHANNEL
+    if (g_wifi_channel > 0) {
+        pb_u8(&pb, 0x0004, (uint8_t)g_wifi_channel);
+        snprintf(channel_log, sizeof(channel_log), "real:%d", g_wifi_channel);
+    }
+#endif
 
-    printf("[WIFI] Sending %s 0x5703: SSID=\"%s\" PASS=****** SEC=%d CH=%d\n",
-           phase ? phase : "UNKNOWN", kWifiSSID, kWifiSecurityType, kWifiChannel);
+#if SHOWCASE_SEND_WIFI_BSSID
+    if (g_have_ap_bssid) {
+        pb_blob(&pb, 0x0005, g_ap_bssid, sizeof(g_ap_bssid));
+        snprintf(bssid_log, sizeof(bssid_log), "real:%02X:%02X:%02X:%02X:%02X:%02X",
+                 g_ap_bssid[0], g_ap_bssid[1], g_ap_bssid[2],
+                 g_ap_bssid[3], g_ap_bssid[4], g_ap_bssid[5]);
+    }
+#endif
+
+    printf("[WIFI] Sending %s 0x5703\n", phase ? phase : "UNKNOWN minimal");
+    printf("[WIFI] 0x5703 fields: SSID=\"%s\" PASS=****** SEC=%d CH=%s BSSID=%s\n",
+           kWifiSSID, kWifiSecurityType, channel_log, bssid_log);
     printf("[WIFI] state before 0x5703: requested=%d transport_seen=%d "
-           "pre_sent=%d post_sent=%d\n",
+           "pre_sent=%d post_sent=%d send_count=%d retry_count=%d\n",
            wifi_config_requested,
            transport_notification_seen,
            wifi_config_sent_pre_transport,
-           wifi_config_sent_post_transport);
-    printf("[WIFI]   (no BSSID param — matching wiomoc reference)\n");
+           wifi_config_sent_post_transport,
+           wifi_config_send_count,
+           wifi_config_retry_count);
 
     printf("[WIFI] Payload redacted (%d bytes, contains hotspot credentials)\n", pb.off);
 
     send_control_msg(0x5703, pb.buf, pb.off);
     pb_free(&pb);
     wifi_config_sent = 1;
+    wifi_config_send_count++;
+    return 1;
+}
+
+static void maybe_start_handoff_watchdog(void) {
+    if (handoff_watchdog_armed) return;
+    if (!mfi_auth_succeeded ||
+        !wireless_carplay_connecting_seen ||
+        !transport_notification_seen ||
+        !wifi_config_sent_post_transport) {
+        return;
+    }
+
+    handoff_watchdog_armed = 1;
+    unsigned int generation = handoff_generation;
+    printf("[HANDOFF] WATCHDOG armed after post-transport 0x5703 "
+           "auth=%d connecting=%d transport_seen=%d sends=%d retries=%d\n",
+           mfi_auth_succeeded,
+           wireless_carplay_connecting_seen,
+           transport_notification_seen,
+           wifi_config_send_count,
+           wifi_config_retry_count);
+    fflush(stdout);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        if (generation != handoff_generation || active_cid == 0) return;
+        printf("[HANDOFF] WATCHDOG: 15s after POST-TRANSPORT 0x5703\n");
+        printf("[HANDOFF] STUCK: iAP2 auth succeeded and Wi-Fi config was sent, but sender has not entered CarPlay network mode.\n");
+        printf("[HANDOFF] Expected next: sender publishes _carplay-ctrl._tcp, receiver connects /ctrl-int/1/connect, sender opens TCP 7000.\n");
+        printf("[HANDOFF] Possible causes: stale/pre-associated Wi-Fi state, SSID/password mismatch, sender policy/profile issue, or rejected Wi-Fi config.\n");
+        fflush(stdout);
+    });
 }
 
 /* ═══════════════════════════════════════════════
@@ -708,7 +786,9 @@ static void send_carplay_start_session(const char *reason) {
         int g = pb_grp_begin(&pb, 0x0001);
         pb_utf8(&pb, 0x0000, kWifiSSID);
         pb_utf8(&pb, 0x0001, kWifiPassword);
-        pb_u8(&pb, 0x0002, kWifiChannel);
+#if SHOWCASE_SEND_WIFI_CHANNEL
+        if (g_wifi_channel > 0) pb_u8(&pb, 0x0002, (uint8_t)g_wifi_channel);
+#endif
         if (wifi_ipv6[0] != '\0') {
             pb_utf8(&pb, 0x0003, wifi_ipv6);
         }
@@ -725,7 +805,17 @@ static void send_carplay_start_session(const char *reason) {
     printf("[SS]   port: %u\n", kAirPlayPort);
     printf("[SS]   wifi IPv6: %s\n", wifi_ipv6[0] ? wifi_ipv6 : "(none)");
     printf("[SS]   srcvers: %s\n", kAirPlaySourceVer);
-    printf("[SS]   SSID: %s  channel: %d\n", kWifiSSID, kWifiChannel);
+#if SHOWCASE_SEND_WIFI_CHANNEL
+    char ss_channel_log[32];
+    if (g_wifi_channel > 0) {
+        snprintf(ss_channel_log, sizeof(ss_channel_log), "real:%d", g_wifi_channel);
+    } else {
+        strcpy(ss_channel_log, "omitted");
+    }
+#else
+    char ss_channel_log[32] = "omitted";
+#endif
+    printf("[SS]   SSID: %s  channel: %s\n", kWifiSSID, ss_channel_log);
 
     send_control_msg(0x4301, pb.buf, pb.off);
     pb_free(&pb);
@@ -769,7 +859,11 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
         break;
     }
     case 0xAA04: printf("[CP] *** AUTH FAILED ***\n"); break;
-    case 0xAA05: printf("[CP] *** AUTH SUCCEEDED! ***\n"); break;
+    case 0xAA05:
+        mfi_auth_succeeded = 1;
+        printf("[CP] *** AUTH SUCCEEDED! ***\n");
+        maybe_start_handoff_watchdog();
+        break;
 
     /* ── Identification ── */
     case 0x1D00:
@@ -827,22 +921,17 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
                start_session_sent);
 
         if (transport_notification_seen) {
-            if (!wifi_config_sent_post_transport) {
-                printf("[WIFI] 0x5702 after 0x4E0E: sending POST-TRANSPORT 0x5703\n");
-                send_accessory_wifi_config("POST-TRANSPORT from 0x5702");
+            printf("[WIFI] 0x5702 after 0x4E0E: sending POST-TRANSPORT retry minimal 0x5703 retry=%d\n",
+                   wifi_config_retry_count + 1);
+            if (send_accessory_wifi_config("POST-TRANSPORT retry minimal")) {
                 wifi_config_sent_post_transport = 1;
-            } else {
-                printf("[WIFI] Duplicate 0x5702 after 0x4E0E ignored; "
-                       "post-transport 0x5703 already sent\n");
+                wifi_config_retry_count++;
+                maybe_start_handoff_watchdog();
             }
         } else {
-            if (!wifi_config_sent_pre_transport) {
-                printf("[WIFI] 0x5702 before 0x4E0E: sending PRE-TRANSPORT compatibility 0x5703\n");
-                send_accessory_wifi_config("PRE-TRANSPORT");
+            printf("[WIFI] 0x5702 before 0x4E0E: sending PRE-TRANSPORT minimal 0x5703\n");
+            if (send_accessory_wifi_config("PRE-TRANSPORT minimal")) {
                 wifi_config_sent_pre_transport = 1;
-            } else {
-                printf("[WIFI] Duplicate 0x5702 before 0x4E0E ignored; "
-                       "pre-transport 0x5703 already sent\n");
             }
         }
         break;
@@ -918,11 +1007,10 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
                transport_notification_seen,
                wifi_config_sent_pre_transport,
                wifi_config_sent_post_transport);
-        printf("[CP] → NETWORK PHASE — iPhone should be switching to WiFi\n");
-        printf("[CP] → Our AP BSSID: %02X:%02X:%02X:%02X:%02X:%02X\n",
-               kApBSSID[0], kApBSSID[1], kApBSSID[2],
-               kApBSSID[3], kApBSSID[4], kApBSSID[5]);
-        printf("[CP] → Waiting for iPhone to auto-join AP and discover _airplay._tcp\n");
+        printf("[CP] -> NETWORK PHASE - iPhone should be switching to WiFi via iAP2 handoff\n");
+        printf("[CP] -> 0x5703 production fields omit channel/BSSID unless debug flags provide real values\n");
+        printf("[CP] -> Waiting for iPhone to auto-join AP and discover _airplay._tcp\n");
+        maybe_start_handoff_watchdog();
         break;
     }
 
@@ -968,12 +1056,10 @@ static void handle_ctrl_msg(uint16_t msg_id, uint8_t *params, int plen) {
                wifi_config_sent_pre_transport,
                wifi_config_sent_post_transport);
 
-        if (!wifi_config_sent_post_transport) {
-            printf("[WIFI] 0x4E0E received: sending POST-TRANSPORT 0x5703 now\n");
-            send_accessory_wifi_config("POST-TRANSPORT after 0x4E0E");
+        printf("[WIFI] 0x4E0E received: sending POST-TRANSPORT from 0x4E0E minimal 0x5703\n");
+        if (send_accessory_wifi_config("POST-TRANSPORT from 0x4E0E minimal")) {
             wifi_config_sent_post_transport = 1;
-        } else {
-            printf("[WIFI] 0x4E0E received: post-transport 0x5703 already sent\n");
+            maybe_start_handoff_watchdog();
         }
 
         /* This is the key trigger point. After 0x4E0E, the iPhone is about to
@@ -1274,10 +1360,8 @@ int main(int argc, char *argv[]) {
     @autoreleasepool {
         printf("[CP] Showcase / carplay_bt\n");
         printf("[CP] Name=%s  SSID=\"%s\"\n", kDeviceName, kWifiSSID);
-        printf("[CP] WiFi: SSID=\"%s\" SEC=%d CH=%d BSSID=%02X:%02X:%02X:%02X:%02X:%02X\n",
-               kWifiSSID, kWifiSecurityType, kWifiChannel,
-               kApBSSID[0], kApBSSID[1], kApBSSID[2],
-               kApBSSID[3], kApBSSID[4], kApBSSID[5]);
+        printf("[CP] WiFi: SSID=\"%s\" SEC=%d CH=omitted BSSID=omitted\n",
+               kWifiSSID, kWifiSecurityType);
         printf("[CP] AirPlay: deviceid=%s port=%u srcvers=%s\n",
                kAirPlayDeviceId, kAirPlayPort, kAirPlaySourceVer);
         printf("[CP] Strategy: identification unchanged (working v40)\n");

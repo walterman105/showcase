@@ -78,7 +78,7 @@ static void ip_log_open(void) {
  * ═══════════════════════════════════════════════════════════════ */
 
 #define APP_NAME          "Showcase"
-#define APP_VERSION       "1.0 beta 2-17"
+#define APP_VERSION       "1.0 beta 2-18"
 #define APP_AUTHOR        "Amine Rostane"
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
 #define BLUETOOTHD_PLIST  "/System/Library/LaunchDaemons/com.apple.bluetoothd.plist"
@@ -1102,10 +1102,13 @@ static NSString *validateSSID(NSString *ssid) {
     ShowcaseState old = self.state;
     self.state = s;
 
-    if (s == StateAwaitingPhone && old != StateAwaitingPhone && self.diagnosticsEnabled) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self startNetworkDumpCapture];
-        });
+    if (s == StateAwaitingPhone && old != StateAwaitingPhone) {
+        ip_log("[HANDOFF] Awaiting sender; CarPlay should perform Wi-Fi association through iAP2 handoff");
+        if (self.diagnosticsEnabled) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self startNetworkDumpCapture];
+            });
+        }
     } else if ((s == StateStopping || s == StateIdle) && old != s) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self stopNetworkDumpCaptureWithReason:@"flow stopped"];
