@@ -183,15 +183,41 @@ static void send_touch(uint8_t phase, uint16_t x, uint16_t y) {
 
 /* ═══════════════════════════════════════════════════════════════
  * AP detection
+ *
+ * On a cellular iPad, the shared network with the iPhone shows up as
+ * "bridge100" (Personal Hotspot). On a Wi-Fi-only iPad joined to a
+ * normal access point as a client, it's the iPad's own Wi-Fi
+ * interface, "en0". Check for either.
  * ═══════════════════════════════════════════════════════════════ */
+
+static const char *const kApIfaceCandidates[] = { AP_INTERFACE, "en0", NULL };
+
+static const char *active_ap_interface(void) {
+    struct ifaddrs *ifa = NULL, *cur;
+    if (getifaddrs(&ifa) != 0) return AP_INTERFACE;
+    const char *found = NULL;
+    for (int i = 0; kApIfaceCandidates[i] && !found; i++) {
+        for (cur = ifa; cur != NULL; cur = cur->ifa_next) {
+            if (cur->ifa_name && (cur->ifa_flags & IFF_UP)
+                && strcmp(cur->ifa_name, kApIfaceCandidates[i]) == 0) {
+                found = kApIfaceCandidates[i];
+                break;
+            }
+        }
+    }
+    freeifaddrs(ifa);
+    return found ?: AP_INTERFACE;
+}
 
 static BOOL is_ap_up(void) {
     struct ifaddrs *ifa = NULL, *cur;
     if (getifaddrs(&ifa) != 0) return NO;
     BOOL up = NO;
-    for (cur = ifa; cur != NULL; cur = cur->ifa_next) {
-        if (cur->ifa_name && strcmp(cur->ifa_name, AP_INTERFACE) == 0
-            && (cur->ifa_flags & IFF_UP)) { up = YES; break; }
+    for (cur = ifa; cur != NULL && !up; cur = cur->ifa_next) {
+        if (!cur->ifa_name || !(cur->ifa_flags & IFF_UP)) continue;
+        for (int i = 0; kApIfaceCandidates[i]; i++) {
+            if (strcmp(cur->ifa_name, kApIfaceCandidates[i]) == 0) { up = YES; break; }
+        }
     }
     freeifaddrs(ifa);
     return up;
@@ -1796,21 +1822,23 @@ static NSString *validateSSID(NSString *ssid) {
     posix_spawn_file_actions_addopen(&actions, 1, TCPDUMP_LOG, O_WRONLY|O_CREAT|O_APPEND, 0644);
     posix_spawn_file_actions_adddup2(&actions, 1, 2);
 
+    const char *apIface = active_ap_interface();
+
     char *argvTimed[] = {
-        (char*)"tcpdump", (char*)"-i", (char*)AP_INTERFACE,
+        (char*)"tcpdump", (char*)"-i", (char*)apIface,
         (char*)"-s", (char*)"0", (char*)"-U",
         (char*)"-G", (char*)"300", (char*)"-W", (char*)"1",
         (char*)"-w", (char*)[pcapPath UTF8String], NULL
     };
     char *argvPlain[] = {
-        (char*)"tcpdump", (char*)"-i", (char*)AP_INTERFACE,
+        (char*)"tcpdump", (char*)"-i", (char*)apIface,
         (char*)"-s", (char*)"0", (char*)"-U",
         (char*)"-w", (char*)[pcapPath UTF8String], NULL
     };
 
     char **argv = useSelfTimeout ? argvPlain : argvTimed;
     ip_log("tcpdump spawn: %s -i %s -s 0 -U %s-w %s",
-           tcpdump, AP_INTERFACE, useSelfTimeout ? "" : "-G 300 -W 1 ",
+           tcpdump, apIface, useSelfTimeout ? "" : "-G 300 -W 1 ",
            [pcapPath UTF8String]);
 
     int err = posix_spawn(&pid, tcpdump, &actions, NULL, argv, environ);
@@ -1872,7 +1900,7 @@ static NSString *validateSSID(NSString *ssid) {
     }
 
     if (!is_ap_up()) {
-        ip_log("tcpdump warning: %s is not up yet; capture may exit", AP_INTERFACE);
+        ip_log("tcpdump warning: neither %s nor en0 is up yet; capture may exit", AP_INTERFACE);
     }
 
     NSString *stamp = [self timestampStringForFilename];

@@ -86,6 +86,33 @@ static void parse_args(int argc, char *argv[]) {
 #define MDNS_REANNOUNCE_SECONDS 300
 #define MDNS_REANNOUNCE_INTERVAL 3
 
+/* ══════════════════════════════════════════════════
+ * Wi-Fi interface resolution
+ *
+ * On a cellular iPad running Personal Hotspot, the network shared with
+ * the iPhone shows up as "bridge100". On a Wi-Fi-only iPad that has
+ * simply joined a normal access point as a client, that shared network
+ * is the iPad's own Wi-Fi interface, "en0". Resolve whichever is
+ * actually present at startup and use it everywhere below instead of
+ * hardcoding "bridge100".
+ * ══════════════════════════════════════════════════ */
+static char g_wifiIface[IF_NAMESIZE] = "bridge100";
+static unsigned int g_wifiIfIndex = 0;
+
+static bool resolve_wifi_interface(void) {
+    static const char *candidates[] = { "bridge100", "en0", "ap1", NULL };
+    for (int i = 0; candidates[i]; i++) {
+        unsigned int idx = if_nametoindex(candidates[i]);
+        if (idx != 0) {
+            strncpy(g_wifiIface, candidates[i], sizeof(g_wifiIface) - 1);
+            g_wifiIface[sizeof(g_wifiIface) - 1] = '\0';
+            g_wifiIfIndex = idx;
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Ed25519 keypair — REAL key generated via PyNaCl.
  * pk = 32-byte Ed25519 public key, hex-encoded for TXT record.
  * sk = 32-byte Ed25519 private seed, stored for pair-setup/verify. */
@@ -1403,10 +1430,10 @@ static bool build_peer_sockaddr(const char *host, uint16_t port,
                        scope, host);
             }
         } else if (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr)) {
-            sin6->sin6_scope_id = if_nametoindex("bridge100");
-            if (sin6->sin6_scope_id) snprintf(scope, sizeof(scope), "bridge100");
-            printf("[TIMING] IPv6 link-local had no scope; using bridge100 scope_id=%u\n",
-                   sin6->sin6_scope_id);
+            sin6->sin6_scope_id = if_nametoindex(g_wifiIface);
+            if (sin6->sin6_scope_id) snprintf(scope, sizeof(scope), "%s", g_wifiIface);
+            printf("[TIMING] IPv6 link-local had no scope; using %s scope_id=%u\n",
+                   g_wifiIface, sin6->sin6_scope_id);
         }
         *outLen = sizeof(struct sockaddr_in6);
         if (display && displayLen) {
@@ -3330,13 +3357,17 @@ static bool mdns_put_a(uint8_t *buf, size_t cap, size_t *off,
     return mdns_put_bytes(buf, cap, off, &addr_be, 4);
 }
 
-static uint32_t bridge100_ipv4_addr(void) {
+static uint32_t wifi_ipv4_addr(void) {
     struct ifaddrs *ifas = NULL;
+    /* 172.20.10.1 is the standard Personal Hotspot gateway address — only
+     * a meaningful fallback when g_wifiIface is "bridge100". For a normal
+     * Wi-Fi client (en0) this is just a last-resort placeholder that
+     * should never actually be hit once the interface has an address. */
     uint32_t out = inet_addr("172.20.10.1");
     if (getifaddrs(&ifas) == 0) {
         for (struct ifaddrs *ifa = ifas; ifa; ifa = ifa->ifa_next) {
             if (!ifa->ifa_name || !ifa->ifa_addr) continue;
-            if (strcmp(ifa->ifa_name, "bridge100") != 0) continue;
+            if (strcmp(ifa->ifa_name, g_wifiIface) != 0) continue;
             if (ifa->ifa_addr->sa_family != AF_INET) continue;
             struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
             out = sin->sin_addr.s_addr;
@@ -3391,7 +3422,7 @@ static int send_unsolicited_mdns_airplay_announcement(void) {
     ok &= mdns_put_txt_bytes(pkt, sizeof(pkt), &off, raop_inst,
                              TXTRecordGetBytesPtr(&raopTxt),
                              TXTRecordGetLength(&raopTxt), 4500);
-    ok &= mdns_put_a(pkt, sizeof(pkt), &off, target, bridge100_ipv4_addr(), 120);
+    ok &= mdns_put_a(pkt, sizeof(pkt), &off, target, wifi_ipv4_addr(), 120);
 
     TXTRecordDeallocate(&apTxt);
     TXTRecordDeallocate(&raopTxt);
@@ -3417,7 +3448,7 @@ static int send_unsolicited_mdns_airplay_announcement(void) {
     memset(&local, 0, sizeof(local));
     local.sin_family = AF_INET;
     local.sin_port = htons(5353);
-    local.sin_addr.s_addr = bridge100_ipv4_addr();
+    local.sin_addr.s_addr = wifi_ipv4_addr();
     if (bind(fd, (struct sockaddr *)&local, sizeof(local)) != 0) {
         /* Do not fail the announcement solely because mDNSResponder owns 5353.
          * A 5353 source port is preferred, but the packet still helps as a
@@ -3425,7 +3456,7 @@ static int send_unsolicited_mdns_airplay_announcement(void) {
         memset(&local, 0, sizeof(local));
         local.sin_family = AF_INET;
         local.sin_port = 0;
-        local.sin_addr.s_addr = bridge100_ipv4_addr();
+        local.sin_addr.s_addr = wifi_ipv4_addr();
         bind(fd, (struct sockaddr *)&local, sizeof(local));
     }
 
@@ -3435,7 +3466,7 @@ static int send_unsolicited_mdns_airplay_announcement(void) {
     setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
 
     struct in_addr ifaddr;
-    ifaddr.s_addr = bridge100_ipv4_addr();
+    ifaddr.s_addr = wifi_ipv4_addr();
     setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr));
 
     struct sockaddr_in dst;
@@ -3537,13 +3568,16 @@ int main(int argc, char *argv[]) {
     /* Issue BAA certificate for auth-setup */
     issue_baa_cert();
 
-    /* Resolve bridge100 */
-    unsigned int br = if_nametoindex("bridge100");
-    if (br == 0) {
-        printf("[SVC] FATAL: bridge100 not found! Is the hotspot active?\n");
+    /* Resolve the Wi-Fi interface shared with the iPhone — bridge100 when
+     * Personal Hotspot is active, en0 when the iPad is a normal Wi-Fi
+     * client joined to an access point. */
+    if (!resolve_wifi_interface()) {
+        printf("[SVC] FATAL: no usable Wi-Fi interface found (tried bridge100, en0, ap1)\n");
+        printf("[SVC] Is the hotspot active, or is the iPad joined to a Wi-Fi network?\n");
         return 1;
     }
-    printf("[SVC] bridge100 ifIndex = %u\n", br);
+    unsigned int br = g_wifiIfIndex;
+    printf("[SVC] Using Wi-Fi interface '%s', ifIndex = %u\n", g_wifiIface, br);
 
     /* Start AirPlay HTTP/RTSP server on port 7000 */
     if (!start_airplay_server(AIRPLAY_PORT)) {
@@ -3616,11 +3650,11 @@ int main(int argc, char *argv[]) {
      * re-announce _airplay/_raop while the phone is expected to join. */
     start_mdns_reannounce_loop(regRef, raopRef);
 
-    /* Browse for _carplay-ctrl._tcp on bridge100.
+    /* Browse for _carplay-ctrl._tcp on the resolved Wi-Fi interface.
      * Browse fires immediately with cached results, but ctrl_connect_thread
      * re-resolves with kDNSServiceFlagsForceMulticast on each round,
      * so stale ports get refreshed automatically. */
-    printf("[MDNS] Browsing for _carplay-ctrl._tcp on bridge100 (if=%u)...\n", br);
+    printf("[MDNS] Browsing for _carplay-ctrl._tcp on %s (if=%u)...\n", g_wifiIface, br);
     DNSServiceRef browseRef = NULL;
     err = DNSServiceBrowse(&browseRef, 0, br,
                            "_carplay-ctrl._tcp", NULL,
