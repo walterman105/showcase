@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <dns_sd.h>
 #include <dispatch/dispatch.h>
+#include <sys/stat.h>
 #include <net/if.h>
 #include <ifaddrs.h>
 #include <sys/time.h>
@@ -211,6 +212,158 @@ static void issue_baa_cert(void) {
     });
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 30LL * NSEC_PER_SEC));
     if (!g_baa_ready) printf("[BAA] Certificate issuance TIMED OUT\n");
+}
+
+/* ══════════════════════════════════════════════════
+ *  BAA certificate cache
+ *
+ *  DeviceIdentityIssueClientCertificateWithCompletion appears to need
+ *  to reach Apple's servers — on a network with no internet uplink
+ *  (e.g. an offline ESP32 access point) it blocks for the full 30s
+ *  timeout and fails. Cache the issued leaf/intermediate certs (plain
+ *  DER, not secret) to disk and persist the private key reference in
+ *  the Keychain, so later runs can skip the network call entirely.
+ *
+ *  Shares BAA_CACHE_DIR with carplay_bt — whichever binary issues a
+ *  fresh certificate first populates the cache for the other.
+ * ══════════════════════════════════════════════════ */
+#define BAA_CACHE_DIR  "/var/mobile/Library/Showcase/baa_cache"
+#define BAA_LEAF_PATH  BAA_CACHE_DIR "/leaf.der"
+#define BAA_INTER_PATH BAA_CACHE_DIR "/inter.der"
+#define BAA_KEY_TAG    "com.roadlinklabs.showcase.baa-key"
+
+static bool baa_write_file(const char *path, const uint8_t *data, int len) {
+    mkdir(BAA_CACHE_DIR, 0700);
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    size_t n = fwrite(data, 1, (size_t)len, f);
+    fclose(f);
+    return n == (size_t)len;
+}
+
+static uint8_t *baa_read_file(const char *path, int *outLen) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); return NULL; }
+    uint8_t *buf = malloc((size_t)sz);
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (n != (size_t)sz) { free(buf); return NULL; }
+    *outLen = (int)sz;
+    return buf;
+}
+
+/* Recursively collect UTCTime (0x17) / GeneralizedTime (0x18) primitives
+ * from a DER blob, in document order. In an X.509 certificate these are
+ * exactly notBefore and notAfter from the Validity sequence — no other
+ * field uses these tags — so out[0]/out[1] are the validity bounds. This
+ * avoids depending on Security.framework's OID constants for a simple
+ * logging helper. */
+static void baa_der_collect_times(const uint8_t *der, long len, char **out, int maxOut, int *count) {
+    for (long i = 0; i + 2 <= len && *count < maxOut; ) {
+        uint8_t tag = der[i];
+        int lenByte = der[i+1];
+        long hdr = 2, bodyLen;
+        if (lenByte & 0x80) {
+            int nBytes = lenByte & 0x7F;
+            if (nBytes == 0 || nBytes > 4 || i + 2 + nBytes > len) return;
+            bodyLen = 0;
+            for (int b = 0; b < nBytes; b++) bodyLen = (bodyLen << 8) | der[i+2+b];
+            hdr = 2 + nBytes;
+        } else {
+            bodyLen = lenByte;
+        }
+        if (bodyLen < 0 || i + hdr + bodyLen > len) return;
+        if (tag == 0x17 || tag == 0x18) {           /* UTCTime / GeneralizedTime */
+            char *s = malloc((size_t)bodyLen + 1);
+            memcpy(s, der + i + hdr, (size_t)bodyLen);
+            s[bodyLen] = '\0';
+            out[(*count)++] = s;
+        } else if (tag & 0x20) {                     /* constructed: recurse */
+            baa_der_collect_times(der + i + hdr, bodyLen, out, maxOut, count);
+        }
+        i += hdr + bodyLen;
+    }
+}
+
+static void baa_log_expiry(const uint8_t *leafDer, int leafLen, const char *prefix) {
+    char *times[4] = {0};
+    int n = 0;
+    baa_der_collect_times(leafDer, leafLen, times, 4, &n);
+    if (n >= 2) printf("[BAA] %s cert valid: notBefore=%s notAfter=%s\n", prefix, times[0], times[1]);
+    else        printf("[BAA] %s cert: could not locate validity dates\n", prefix);
+    for (int i = 0; i < n; i++) free(times[i]);
+}
+
+static bool baa_save_key_to_keychain(SecKeyRef key) {
+    NSDictionary *delQuery = @{
+        (id)kSecClass: (id)kSecClassKey,
+        (id)kSecAttrApplicationTag: @BAA_KEY_TAG,
+    };
+    SecItemDelete((__bridge CFDictionaryRef)delQuery);  /* drop any stale entry */
+
+    NSDictionary *add = @{
+        (id)kSecClass: (id)kSecClassKey,
+        (id)kSecAttrApplicationTag: @BAA_KEY_TAG,
+        (id)kSecValueRef: (__bridge id)key,
+        (id)kSecAttrAccessible: (id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+    };
+    OSStatus status = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
+    if (status != errSecSuccess) {
+        printf("[BAA] Keychain SecItemAdd failed: %d\n", (int)status);
+        return false;
+    }
+    return true;
+}
+
+static SecKeyRef baa_load_key_from_keychain(void) {
+    NSDictionary *query = @{
+        (id)kSecClass: (id)kSecClassKey,
+        (id)kSecAttrApplicationTag: @BAA_KEY_TAG,
+        (id)kSecReturnRef: @YES,
+    };
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (status != errSecSuccess || !result) return NULL;
+    return (SecKeyRef)result;
+}
+
+/* Try to load a previously-cached BAA identity (possibly written by
+ * carplay_bt). Returns true and leaves g_baa_ready=true on success,
+ * with no network used. */
+static bool load_cached_baa(void) {
+    int leafLen = 0, interLen = 0;
+    uint8_t *leaf  = baa_read_file(BAA_LEAF_PATH, &leafLen);
+    uint8_t *inter = baa_read_file(BAA_INTER_PATH, &interLen);
+    if (!leaf || !inter) { free(leaf); free(inter); return false; }
+
+    SecKeyRef key = baa_load_key_from_keychain();
+    if (!key) { free(leaf); free(inter); return false; }
+
+    g_baa_leaf_der = leaf;   g_baa_leaf_len = leafLen;
+    g_baa_inter_der = inter; g_baa_inter_len = interLen;
+    g_baa_key = key;
+    g_baa_ready = true;
+    printf("[BAA] Loaded cached certificate from %s (no network used)\n", BAA_CACHE_DIR);
+    baa_log_expiry(g_baa_leaf_der, g_baa_leaf_len, "cached");
+    return true;
+}
+
+/* Persist a freshly-issued BAA identity for future offline runs. */
+static void save_baa_cache(void) {
+    if (!g_baa_ready) return;
+    bool ok = baa_write_file(BAA_LEAF_PATH, g_baa_leaf_der, g_baa_leaf_len)
+           && baa_write_file(BAA_INTER_PATH, g_baa_inter_der, g_baa_inter_len)
+           && baa_save_key_to_keychain(g_baa_key);
+    if (ok) {
+        printf("[BAA] Cached certificate to %s for offline reuse\n", BAA_CACHE_DIR);
+        baa_log_expiry(g_baa_leaf_der, g_baa_leaf_len, "issued");
+    } else {
+        printf("[BAA] WARNING: failed to cache certificate — offline runs will need network again\n");
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1007,8 +1160,11 @@ static void handle_auth_setup(int sock, const HTTPReq *r) {
     printf("\n");
 
     if (!g_baa_ready) {
-        printf("[AP] auth-setup: BAA not ready, attempting issuance...\n");
-        issue_baa_cert();
+        printf("[AP] auth-setup: BAA not ready, attempting cache then issuance...\n");
+        if (!load_cached_baa()) {
+            issue_baa_cert();
+            if (g_baa_ready) save_baa_cache();
+        }
     }
     if (!g_baa_ready || !g_baa_key) {
         printf("[AP] auth-setup: BAA certificate unavailable\n");
@@ -3566,7 +3722,10 @@ int main(int argc, char *argv[]) {
     printf("[SVC] Ed25519:   REAL keypair (sk stored for pair-verify)\n");
 
     /* Issue BAA certificate for auth-setup */
-    issue_baa_cert();
+    if (!load_cached_baa()) {
+        issue_baa_cert();
+        if (g_baa_ready) save_baa_cache();
+    }
 
     /* Resolve the Wi-Fi interface shared with the iPhone — bridge100 when
      * Personal Hotspot is active, en0 when the iPad is a normal Wi-Fi

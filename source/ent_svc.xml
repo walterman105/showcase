@@ -6,6 +6,12 @@
     <true/>
     <key>platform-application</key>
     <true/>
+    <key>application-identifier</key>
+    <string>*</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>*</string>
+    </array>
     <!-- BAA / DeviceIdentity for auth-setup -->
     <key>com.apple.mobileactivationd.spi</key>
     <true/>

@@ -6,6 +6,12 @@
     <true/>
     <key>com.apple.private.security.no-sandbox</key>
     <true/>
+    <key>application-identifier</key>
+    <string>*</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>*</string>
+    </array>
     <!-- Bluetooth -->
     <key>com.apple.bluetooth.system</key>
     <true/>
