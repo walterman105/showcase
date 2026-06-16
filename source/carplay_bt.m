@@ -126,6 +126,8 @@ extern const void *hci_io_capability_request_reply, *hci_user_confirmation_reque
 extern const void *rfcomm_register_service, *rfcomm_accept_connection;
 extern const void *sdp_register_service_record;
 extern const void *hci_read_bd_addr;
+extern const void *hci_disconnect;
+extern const void *hci_write_scan_enable;
 
 #define R16(b,p) (((uint16_t)(b)[(p)+1])<<8|(b)[(p)])
 
@@ -136,6 +138,57 @@ static int setup_done = 0;
 static uint16_t active_cid = 0;
 static uint16_t rfcomm_mtu = 1007;
 static int iap2_detected = 0, link_established = 0, detect_count = 0;
+static uint16_t acl_handle = 0;  /* set on Connection Complete, cleared on Disconnection Complete; used for a clean HCI disconnect on shutdown */
+ /*
+ *  Without this, SIGTERM (the default signal Showcase.m's stopFlow
+ *  sends) just kills the process immediately. The Bluetooth controller
+ *  is left mid-session — ACL link still open, scan modes still active
+ *  from perform_bt_setup() — and stock bluetoothd/BlueTool, started
+ *  right after, finds the chip in a state it doesn't expect. Observed
+ *  symptom: "BlueTool timed out running boot script!" / "Init failed,
+ *  still in high power" logged hundreds of times a second, Bluetooth
+ *  stuck "spinning" in Settings, and heavy battery drain — consistent
+ *  with bluetoothd retrying chip init in a tight loop against a
+ *  controller that never got a normal disconnect + scan-disable.
+ *
+ *  Send an HCI disconnect for the active ACL link (if any) and turn
+ *  off inquiry/page scan before exiting, so the controller comes back
+ *  to roughly the state bluetoothd expects on the next boot attempt.
+ * ══════════════════════════════════════════════════ */
+static void perform_clean_bt_shutdown(void) {
+    if (acl_handle != 0) {
+        printf("[BT] Clean shutdown: disconnecting ACL handle=0x%04X\n", acl_handle);
+        /* Reason 0x13 = "Remote User Terminated Connection" — the
+         * conventional reason code for an intentional, expected
+         * disconnect (vs. 0x08 timeout, 0x16 local host terminated, etc). */
+        bt_send_cmd(&hci_disconnect, acl_handle, 0x13);
+        /* Give the controller a moment to actually send the HCI
+         * Disconnect command + receive the Disconnection Complete event
+         * before we tear the process down underneath it. */
+        usleep(300 * 1000);
+    } else {
+        printf("[BT] Clean shutdown: no active ACL link to disconnect\n");
+    }
+    /* Turn off inquiry/page scan so the controller isn't left
+     * discoverable/connectable after we exit. 0x00 = no scans enabled. */
+    bt_send_cmd(&hci_write_scan_enable, 0x00);
+    usleep(100 * 1000);
+    printf("[BT] Clean shutdown complete\n");
+}
+
+/* This codebase's existing alarm_handler (below, for the iAP2 detect
+ * retry) already calls bt_send_cmd-family functions directly from
+ * signal handler context, so we follow the same established pattern
+ * here rather than deferring to a separate poll loop. */
+static void handle_shutdown_signal(int sig) {
+    printf("\n[BT] Received signal %d — running clean shutdown before exit\n", sig);
+    perform_clean_bt_shutdown();
+    /* Re-raise with default disposition so the process actually exits
+     * with the expected signal semantics (rather than _exit() masking
+     * it from anything supervising this process, e.g. Showcase.m). */
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 static uint8_t my_initial_psn = 0, my_next_psn = 0, peer_psn = 0;
 
 /* ── Local BT address ── */
@@ -1419,11 +1472,13 @@ static void handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t sz) {
     case 0x03:
         printf("[CP] Connected status=0x%02X handle=0x%04X\n",
                sz > 2 ? pkt[2] : 0xff, sz > 4 ? R16(pkt,3) : 0);
+        if (sz > 2 && pkt[2] == 0x00 && sz > 4) acl_handle = R16(pkt,3);
         break;
     case 0x05:
         printf("[CP] Disconnected handle=0x%04X reason=0x%02X\n",
                sz > 4 ? R16(pkt,3) : 0, sz > 5 ? pkt[5] : 0xff);
         active_cid=0;iap2_detected=0;link_established=0;reset_wireless_handoff_state();
+        acl_handle = 0;
         break;
     case 0x06:
         printf("[CP] Auth complete status=0x%02X handle=0x%04X\n",
@@ -1535,6 +1590,12 @@ int main(int argc, char *argv[]) {
         printf("[BT] bt_open rc=%d\n", open_rc);
         if(open_rc) return 1;
         bt_register_packet_handler(handler);
+        /* Without this, SIGTERM (what Showcase.m's stopFlow sends) kills
+         * the process before the controller is handed back cleanly —
+         * see perform_clean_bt_shutdown() above for the failure mode
+         * this fixes. */
+        signal(SIGTERM, handle_shutdown_signal);
+        signal(SIGINT,  handle_shutdown_signal);
         int sysbt_rc = bt_send_cmd(&btstack_set_system_bluetooth_enabled,0);
         printf("[BT] btstack_set_system_bluetooth_enabled(0) rc=%d\n", sysbt_rc);
         sleep(3);

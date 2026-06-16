@@ -1484,7 +1484,17 @@ static NSString *validateSSID(NSString *ssid) {
         g_carplay_w = 0; g_carplay_h = 0;
 
         kill_pid(self.carplayServicesPid); self.carplayServicesPid = 0;
-        kill_pid(self.carplayBtPid);       self.carplayBtPid = 0;
+        /* carplay_bt now traps SIGTERM and runs an HCI disconnect +
+         * scan-disable before exiting (see handle_shutdown_signal in
+         * carplay_bt.m) — give it a moment to actually do that before
+         * we yank BTstack out from under it and hand the controller
+         * back to stock bluetoothd. Without this gap, bluetoothd/
+         * BlueTool can find the chip mid-session and loop retrying its
+         * boot script (observed as repeated "Init failed, still in
+         * high power" log spam + battery drain + stuck Bluetooth UI). */
+        kill_pid(self.carplayBtPid);
+        usleep(500 * 1000);
+        self.carplayBtPid = 0;
         self.btdaemonPid = 0;
 
         const char *launchctl = launchctl_path();
