@@ -77,7 +77,7 @@ static void ip_log_open(void) {
  * Configuration
  * ═══════════════════════════════════════════════════════════════ */
 
-#define APP_NAME          "Showcase"
+#define APP_NAME          "Showcase [NoCell]"
 #define APP_VERSION       "1.0 beta 2-19"
 #define APP_AUTHOR        "Amine Rostane"
 #define SOCK_PATH         "/tmp/ipadplay.sock"   /* IPC socket — kept for compat with carplay_services */
@@ -190,7 +190,7 @@ static void send_touch(uint8_t phase, uint16_t x, uint16_t y) {
  * interface, "en0". Check for either.
  * ═══════════════════════════════════════════════════════════════ */
 
-static const char *const kApIfaceCandidates[] = { AP_INTERFACE, "en0", NULL };
+static const char *const kApIfaceCandidates[] = { AP_INTERFACE, "en3", "en0", NULL };
 
 static const char *active_ap_interface(void) {
     struct ifaddrs *ifa = NULL, *cur;
@@ -1484,18 +1484,27 @@ static NSString *validateSSID(NSString *ssid) {
         g_carplay_w = 0; g_carplay_h = 0;
 
         kill_pid(self.carplayServicesPid); self.carplayServicesPid = 0;
-        /* carplay_bt now traps SIGTERM and runs an HCI disconnect +
-         * scan-disable before exiting (see handle_shutdown_signal in
+        /* carplay_bt now traps SIGTERM and runs a disconnect + scan-
+         * disable + hci_reset sequence before exiting (see
+         * handle_shutdown_signal/perform_clean_bt_shutdown in
          * carplay_bt.m) — give it a moment to actually do that before
          * we yank BTstack out from under it and hand the controller
          * back to stock bluetoothd. Without this gap, bluetoothd/
          * BlueTool can find the chip mid-session and loop retrying its
          * boot script (observed as repeated "Init failed, still in
-         * high power" log spam + battery drain + stuck Bluetooth UI). */
+         * high power" log spam + battery drain + stuck Bluetooth UI).
+         * carplay_bt.log has the detailed [BT-SHUTDOWN] step trace;
+         * these app.log lines just mark the surrounding timeline so
+         * the two logs can be correlated. */
+        ip_log("stopFlow: sending SIGTERM to carplay_bt pid=%d, see carplay_bt.log [BT-SHUTDOWN] for detail",
+               (int)self.carplayBtPid);
         kill_pid(self.carplayBtPid);
+        ip_log("stopFlow: carplay_bt exited, waiting extra 500ms settle before touching BTstack/bluetoothd");
         usleep(500 * 1000);
         self.carplayBtPid = 0;
         self.btdaemonPid = 0;
+
+        ip_log("stopFlow: unloading BTstack, reloading stock bluetoothd");
 
         const char *launchctl = launchctl_path();
         if (launchctl) {
@@ -1511,6 +1520,7 @@ static NSString *validateSSID(NSString *ssid) {
                                          (char*)BLUETOOL_PLIST, NULL };
             run_blocking(launchctl, loadBlueToolArgv);
 #endif
+            ip_log("stopFlow: bluetoothd/BlueTool reload commands issued — watch Console for BlueTool init behavior now");
         } else {
             ip_log("WARNING: launchctl not found while restoring bluetoothd");
         }
@@ -1910,7 +1920,7 @@ static NSString *validateSSID(NSString *ssid) {
     }
 
     if (!is_ap_up()) {
-        ip_log("tcpdump warning: neither %s nor en0 is up yet; capture may exit", AP_INTERFACE);
+        ip_log("tcpdump warning: none of %s/en3/en0 is up yet; capture may exit", AP_INTERFACE);
     }
 
     NSString *stamp = [self timestampStringForFilename];

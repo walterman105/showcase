@@ -88,23 +88,43 @@ static void parse_args(int argc, char *argv[]) {
 #define MDNS_REANNOUNCE_INTERVAL 3
 
 /* ══════════════════════════════════════════════════
- * Wi-Fi interface resolution
+ * Wi-Fi/shared-network interface resolution
  *
  * On a cellular iPad running Personal Hotspot, the network shared with
  * the iPhone shows up as "bridge100". On a Wi-Fi-only iPad that has
  * simply joined a normal access point as a client, that shared network
- * is the iPad's own Wi-Fi interface, "en0". Resolve whichever is
- * actually present at startup and use it everywhere below instead of
- * hardcoding "bridge100".
+ * is the iPad's own Wi-Fi interface, "en0". On an iPad using a
+ * USB/Lightning Ethernet adapter (e.g. bridged through a Raspberry Pi),
+ * it's "en3" — en0 is reserved for Wi-Fi and may still exist (idle/
+ * unassociated) alongside it, so en3 is checked first: if Ethernet is
+ * actually up, that's the real shared-network path, not a coincidentally
+ * present Wi-Fi interface.
  * ══════════════════════════════════════════════════ */
 static char g_wifiIface[IF_NAMESIZE] = "bridge100";
 static unsigned int g_wifiIfIndex = 0;
 
+static bool iface_is_up(const char *name) {
+    struct ifaddrs *ifas = NULL, *cur;
+    if (getifaddrs(&ifas) != 0) return false;
+    bool up = false;
+    for (cur = ifas; cur; cur = cur->ifa_next) {
+        if (cur->ifa_name && strcmp(cur->ifa_name, name) == 0
+            && (cur->ifa_flags & IFF_UP)) { up = true; break; }
+    }
+    freeifaddrs(ifas);
+    return up;
+}
+
 static bool resolve_wifi_interface(void) {
-    static const char *candidates[] = { "bridge100", "en0", "ap1", NULL };
+    static const char *candidates[] = { "bridge100", "en3", "en0", "ap1", NULL };
     for (int i = 0; candidates[i]; i++) {
         unsigned int idx = if_nametoindex(candidates[i]);
-        if (idx != 0) {
+        /* Require IFF_UP, not just existence — with 4 candidates now
+         * (vs. the original 2), it's plausible for an earlier-priority
+         * interface to exist-but-be-down (e.g. en0 idle while en3
+         * Ethernet is the actually-active path) and we don't want to
+         * bind to a dead interface just because it's first in line. */
+        if (idx != 0 && iface_is_up(candidates[i])) {
             strncpy(g_wifiIface, candidates[i], sizeof(g_wifiIface) - 1);
             g_wifiIface[sizeof(g_wifiIface) - 1] = '\0';
             g_wifiIfIndex = idx;

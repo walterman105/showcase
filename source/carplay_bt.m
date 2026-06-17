@@ -47,6 +47,7 @@
 #include <dlfcn.h>
 #include <dispatch/dispatch.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 /* ══════════════════════════════════════════════════
  *  Configuration — populated from argv at startup.
@@ -128,6 +129,7 @@ extern const void *sdp_register_service_record;
 extern const void *hci_read_bd_addr;
 extern const void *hci_disconnect;
 extern const void *hci_write_scan_enable;
+extern const void *hci_reset;
 
 #define R16(b,p) (((uint16_t)(b)[(p)+1])<<8|(b)[(p)])
 
@@ -142,38 +144,63 @@ static uint16_t acl_handle = 0;  /* set on Connection Complete, cleared on Disco
  /*
  *  Without this, SIGTERM (the default signal Showcase.m's stopFlow
  *  sends) just kills the process immediately. The Bluetooth controller
- *  is left mid-session — ACL link still open, scan modes still active
- *  from perform_bt_setup() — and stock bluetoothd/BlueTool, started
- *  right after, finds the chip in a state it doesn't expect. Observed
+ *  is left mid-session — ACL link still open, scan modes still active,
+ *  custom local name / class-of-device / EIR still set from
+ *  perform_bt_setup() — and stock bluetoothd/BlueTool, started right
+ *  after, finds the chip in a state it doesn't expect. Observed
  *  symptom: "BlueTool timed out running boot script!" / "Init failed,
  *  still in high power" logged hundreds of times a second, Bluetooth
- *  stuck "spinning" in Settings, and heavy battery drain — consistent
- *  with bluetoothd retrying chip init in a tight loop against a
- *  controller that never got a normal disconnect + scan-disable.
+ *  stuck "spinning" in Settings, and heavy battery drain.
  *
- *  Send an HCI disconnect for the active ACL link (if any) and turn
- *  off inquiry/page scan before exiting, so the controller comes back
- *  to roughly the state bluetoothd expects on the next boot attempt.
+ *  A clean HCI disconnect alone only closes the link layer — it does
+ *  NOT undo the custom name/COD/EIR/SDP state BTstack wrote into the
+ *  controller. Those persist until an explicit hci_reset or a power
+ *  cycle. So this now does disconnect -> scan-disable -> hci_reset,
+ *  which is the standard BTstack-recommended sequence for handing a
+ *  controller back to another stack cleanly.
  * ══════════════════════════════════════════════════ */
+static double bt_now_ms(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+}
+
 static void perform_clean_bt_shutdown(void) {
+    double t0 = bt_now_ms();
+    printf("[BT-SHUTDOWN] ──── begin clean shutdown sequence ────\n");
+    printf("[BT-SHUTDOWN] state: acl_handle=0x%04X active_cid=0x%04X iap2_detected=%d link_established=%d\n",
+           acl_handle, active_cid, iap2_detected, link_established);
+
     if (acl_handle != 0) {
-        printf("[BT] Clean shutdown: disconnecting ACL handle=0x%04X\n", acl_handle);
-        /* Reason 0x13 = "Remote User Terminated Connection" — the
-         * conventional reason code for an intentional, expected
-         * disconnect (vs. 0x08 timeout, 0x16 local host terminated, etc). */
-        bt_send_cmd(&hci_disconnect, acl_handle, 0x13);
-        /* Give the controller a moment to actually send the HCI
-         * Disconnect command + receive the Disconnection Complete event
-         * before we tear the process down underneath it. */
+        printf("[BT-SHUTDOWN] [t+%.0fms] sending hci_disconnect handle=0x%04X reason=0x13 (Remote User Terminated)\n",
+               bt_now_ms() - t0, acl_handle);
+        int rc = bt_send_cmd(&hci_disconnect, acl_handle, 0x13);
+        printf("[BT-SHUTDOWN] [t+%.0fms] hci_disconnect rc=%d\n", bt_now_ms() - t0, rc);
+        printf("[BT-SHUTDOWN] [t+%.0fms] waiting 300ms for Disconnection Complete...\n", bt_now_ms() - t0);
         usleep(300 * 1000);
+        printf("[BT-SHUTDOWN] [t+%.0fms] post-wait acl_handle=0x%04X (0x0000 means Disconnection Complete was seen)\n",
+               bt_now_ms() - t0, acl_handle);
     } else {
-        printf("[BT] Clean shutdown: no active ACL link to disconnect\n");
+        printf("[BT-SHUTDOWN] [t+%.0fms] no active ACL link — skipping disconnect\n", bt_now_ms() - t0);
     }
-    /* Turn off inquiry/page scan so the controller isn't left
-     * discoverable/connectable after we exit. 0x00 = no scans enabled. */
-    bt_send_cmd(&hci_write_scan_enable, 0x00);
+
+    printf("[BT-SHUTDOWN] [t+%.0fms] sending hci_write_scan_enable(0x00) — disable inquiry+page scan\n",
+           bt_now_ms() - t0);
+    int scan_rc = bt_send_cmd(&hci_write_scan_enable, 0x00);
+    printf("[BT-SHUTDOWN] [t+%.0fms] hci_write_scan_enable rc=%d\n", bt_now_ms() - t0, scan_rc);
     usleep(100 * 1000);
-    printf("[BT] Clean shutdown complete\n");
+
+    /* hci_reset clears custom name/COD/EIR/SDP and returns the
+     * controller to its power-on defaults — this is the piece a plain
+     * disconnect doesn't cover. Give it the longest settle time since
+     * a full controller reset is the heaviest of these three commands. */
+    printf("[BT-SHUTDOWN] [t+%.0fms] sending hci_reset — clears custom name/COD/EIR/SDP state\n",
+           bt_now_ms() - t0);
+    int reset_rc = bt_send_cmd(&hci_reset);
+    printf("[BT-SHUTDOWN] [t+%.0fms] hci_reset rc=%d\n", bt_now_ms() - t0, reset_rc);
+    printf("[BT-SHUTDOWN] [t+%.0fms] waiting 500ms for reset to complete...\n", bt_now_ms() - t0);
+    usleep(500 * 1000);
+
+    printf("[BT-SHUTDOWN] ──── clean shutdown sequence complete, total %.0fms ────\n", bt_now_ms() - t0);
 }
 
 /* This codebase's existing alarm_handler (below, for the iAP2 detect
@@ -181,8 +208,10 @@ static void perform_clean_bt_shutdown(void) {
  * signal handler context, so we follow the same established pattern
  * here rather than deferring to a separate poll loop. */
 static void handle_shutdown_signal(int sig) {
-    printf("\n[BT] Received signal %d — running clean shutdown before exit\n", sig);
+    printf("\n[BT-SHUTDOWN] Received signal %d (%s) — running clean shutdown before exit\n",
+           sig, sig == SIGTERM ? "SIGTERM" : sig == SIGINT ? "SIGINT" : "?");
     perform_clean_bt_shutdown();
+    printf("[BT-SHUTDOWN] Re-raising signal %d with default disposition to actually exit\n", sig);
     /* Re-raise with default disposition so the process actually exits
      * with the expected signal semantics (rather than _exit() masking
      * it from anything supervising this process, e.g. Showcase.m). */
